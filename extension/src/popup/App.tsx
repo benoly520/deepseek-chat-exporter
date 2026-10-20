@@ -427,12 +427,14 @@ function InfoItem(props: { label: string; value: string }) {
  */
 function SessionItem(props: { session: SessionSummary; index: number }) {
   const s = () => resolve(props.session);
+  // 动态 props 是 getter 函数，必须 resolve 后再运算，否则会渲染成函数源码字符串
+  const index = () => resolve(props.index) + 1;
   const checked = () => selected().has(s().id);
   const date = () => formatSessionDate(s());
 
   return (
     <label class="session-item">
-      <span class="session-index">{props.index + 1}</span>
+      <span class="session-index">{index()}</span>
       <input
         type="checkbox"
         checked={checked()}
