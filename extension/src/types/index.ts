@@ -97,7 +97,12 @@ export type MessageType =
   | 'GET_STATUS'
   | 'EXPORT_CURRENT'
   | 'EXPORT_ALL'
+  | 'EXPORT_SELECTED'
   | 'EXPORT_PROGRESS'
+  | 'LOAD_SESSIONS'
+  | 'LIST_PROGRESS'
+  | 'DELETE_SESSIONS'
+  | 'DELETE_REQUEST_CAPTURED'
   | 'FETCH_PROXY'
   | 'LOG_ENTRY'
   | 'GET_LOGS'
@@ -118,6 +123,10 @@ export interface StatusPayload {
   exportProgress: number;
   /** 批量导出详情（仅 SW 侧填充）：正在导出第几个会话 */
   exportCurrent?: { index: number; total: number; title: string } | null;
+  /** 删除接口是否已学习（用户在页面手动删除过会话后为 true） */
+  deleteTemplateReady?: boolean;
+  /** 会话列表是否已加载及总数 */
+  sessionCacheCount?: number;
   /** 诊断用：最近捕获到的 /api/ 请求 URL（最新在前，最多 20 条） */
   recentApiUrls?: string[];
   /** 诊断用：状态获取失败的详细原因（如 content script 不可达） */
@@ -131,9 +140,9 @@ export interface FetchProxyPayload {
   method?: string;
 }
 
-/** hook 捕获的页面 API 请求配置（SW 代理据此原样重放） */
+/** hook 捕获的页面 API 请求配置（SW 代理据此原样重放；delete 用于批量删除学习） */
 export interface CapturedApiRequest {
-  kind: 'fetchPage' | 'history';
+  kind: 'fetchPage' | 'history' | 'delete' | 'other';
   url: string;
   method: string;
   body?: string;

@@ -39,13 +39,24 @@
   }
 
   /**
-   * 捕获目标 API 的完整请求配置（url / method / body），
-   * 供 SW 代理"原样重放"——真实端点可能是 GET + query 参数，不能想当然用 POST。
+   * 捕获 /api/ 请求的完整配置（url / method / body）。
+   * kind 分类：fetchPage / history 供导出重放；delete 供删除接口学习
+   * （用户在页面手动删除会话时捕获真实删除请求，批量删除据此重放）。
    */
   function noteApiRequest(url: string, method: string, body?: string) {
-    if (!isSessionListApi(url) && !isHistoryApi(url)) return;
+    if (!url.includes('/api/')) return;
+    let kind: 'fetchPage' | 'history' | 'delete' | 'other' = 'other';
+    if (isSessionListApi(url)) {
+      kind = 'fetchPage';
+    } else if (isHistoryApi(url)) {
+      kind = 'history';
+    } else if (/chat_session\/delete|\/delete/i.test(url)) {
+      kind = 'delete';
+    } else {
+      return; // 其他请求不捕获，避免噪音
+    }
     dispatchDataEvent('api_request', {
-      kind: isSessionListApi(url) ? 'fetchPage' : 'history',
+      kind,
       url,
       method: method.toUpperCase(),
       body: typeof body === 'string' && body ? body : undefined,

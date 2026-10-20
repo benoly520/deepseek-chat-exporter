@@ -35,6 +35,30 @@ let exportProgress = 0;
 /** 批量导出详情：正在导出第几个会话（标题） */
 let exportCurrent: { index: number; total: number; title: string } | null = null;
 
+/** 会话列表缓存（SW 内存态，popup 每次打开可重新加载） */
+let sessionCache: SessionSummary[] = [];
+let sessionCacheTime = 0;
+const SESSION_CACHE_TTL = 60_000;
+
+/** 删除接口模板（学习式：用户在页面手动删除会话时由 hook 捕获） */
+const DELETE_TEMPLATE_KEY = 'ds_exporter_delete_template';
+let deleteTemplate: CapturedApiRequest | null = null;
+
+/** UUID 格式（用于删除请求 body 中的会话 ID 替换） */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// 启动时恢复删除接口模板
+chrome.storage.local
+  .get(DELETE_TEMPLATE_KEY)
+  .then((result) => {
+    const stored = result[DELETE_TEMPLATE_KEY] as CapturedApiRequest | undefined;
+    if (stored?.url) {
+      deleteTemplate = stored;
+      logger.info('Delete template restored', stored.url);
+    }
+  })
+  .catch(() => {});
+
 /** DeepSeek API 基地址 */
 const API_BASE = 'https://chat.deepseek.com';
 /** 会话列表每页数量 */
@@ -73,9 +97,30 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
   } else if (message.type === 'EXPORT_CURRENT') {
     exportCurrentConversation(sendResponse);
     return true;
-  } else if (message.type === 'EXPORT_ALL') {
-    exportAllConversations(sendResponse);
+  } else if (message.type === 'LOAD_SESSIONS') {
+    loadAllSessions(sendResponse);
     return true;
+  } else if (message.type === 'EXPORT_SELECTED') {
+    exportSelectedConversations(
+      (message.payload as { sessionIds: string[] }).sessionIds,
+      sendResponse
+    );
+    return true;
+  } else if (message.type === 'DELETE_SESSIONS') {
+    deleteSessions(
+      (message.payload as { sessionIds: string[] }).sessionIds,
+      sendResponse
+    );
+    return true;
+  } else if (message.type === 'DELETE_REQUEST_CAPTURED') {
+    // 学习删除接口：保存模板（内存 + 持久化）
+    const req = message.payload as CapturedApiRequest;
+    deleteTemplate = req;
+    chrome.storage.local
+      .set({ [DELETE_TEMPLATE_KEY]: req })
+      .catch((error) => logger.error('Failed to persist delete template', String(error)));
+    logger.info('Delete template learned', { url: req.url, method: req.method });
+    sendResponse({ success: true });
   } else if (
     message.type === 'SESSION_LIST' ||
     message.type === 'HISTORY_MESSAGES' ||
@@ -136,6 +181,8 @@ async function getStatus(sendResponse: (response: StatusPayload) => void) {
         exporting: exportInProgress,
         exportProgress,
         exportCurrent,
+        deleteTemplateReady: Boolean(deleteTemplate),
+        sessionCacheCount: sessionCache.length,
       });
     } else {
       sendResponse({ ...idleStatus, swError: 'content script 空响应' });
@@ -143,7 +190,60 @@ async function getStatus(sendResponse: (response: StatusPayload) => void) {
   } catch (error) {
     // content script 未注入（页面尚未刷新过）等场景
     logger.warn('GET_STATUS: content script unreachable', String(error));
-    sendResponse({ ...idleStatus, swError: `content script 不可达: ${String(error)}` });
+    sendResponse({
+      ...idleStatus,
+      swError: `content script 不可达: ${String(error)}`,
+      deleteTemplateReady: Boolean(deleteTemplate),
+      sessionCacheCount: sessionCache.length,
+    });
+  }
+}
+
+/**
+ * 广播列表加载进度（popup 显示已加载条数）。
+ */
+function broadcastListProgress(loaded: number) {
+  try {
+    const result = chrome.runtime.sendMessage({
+      type: 'LIST_PROGRESS',
+      payload: { loaded },
+    } as ExtensionMessage);
+    if (result && typeof result.catch === 'function') {
+      result.catch(() => {});
+    }
+  } catch {
+    // 无监听时忽略
+  }
+}
+
+/**
+ * 拉取全部会话列表（keyset 分页），带缓存（60 秒内直接返回）。
+ */
+async function loadAllSessions(sendResponse: (response: any) => void) {
+  if (sessionCache.length > 0 && Date.now() - sessionCacheTime < SESSION_CACHE_TTL) {
+    sendResponse({ sessions: sessionCache, cached: true });
+    return;
+  }
+
+  const tabId = await getActiveDeepSeekTabId();
+  if (!tabId) {
+    sendResponse({ error: '未找到 DeepSeek 标签页，请先打开 chat.deepseek.com' });
+    return;
+  }
+
+  try {
+    // 获取页面真实请求配置（fetch_page / history）
+    const tpl = await sendToTab<{
+      fetchPageRequest?: CapturedApiRequest;
+      historyRequest?: CapturedApiRequest;
+    }>(tabId, { type: 'EXPORT_ALL' });
+
+    sessionCache = await fetchAllSessions(tabId, tpl.fetchPageRequest);
+    sessionCacheTime = Date.now();
+    sendResponse({ sessions: sessionCache });
+  } catch (error) {
+    logger.error('loadAllSessions failed', String(error));
+    sendResponse({ error: String(error) });
   }
 }
 
@@ -246,6 +346,8 @@ async function fetchAllSessions(
       added,
       total: sessions.length,
     });
+    // 列表加载进度（popup 显示已加载条数）
+    broadcastListProgress(sessions.length);
 
     // 本页没有新会话：说明已到末尾（游标可能未生效），防死循环
     if (added === 0) {
@@ -441,43 +543,61 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
 }
 
 /**
- * 批量导出全部会话（游标分页 + 限速）。
+ * 导出选中的会话（popup 列表勾选，全选 = 真正的全量导出）。
+ * 逐个拉取历史 + 限速 + 进度反馈。
  */
-async function exportAllConversations(sendResponse: (response: any) => void) {
+async function exportSelectedConversations(
+  sessionIds: string[],
+  sendResponse: (response: any) => void
+) {
   const tabId = await getActiveDeepSeekTabId();
   if (!tabId) {
-    logger.warn('exportAll: no DeepSeek tab');
+    logger.warn('exportSelected: no DeepSeek tab');
     sendResponse({ error: '未找到 DeepSeek 标签页，请先打开 chat.deepseek.com' });
+    return;
+  }
+
+  if (!sessionIds || sessionIds.length === 0) {
+    sendResponse({ error: '未选择任何会话' });
     return;
   }
 
   try {
     exportInProgress = true;
     exportProgress = 0;
-    logger.info('exportAll start', { tabId });
+    logger.info('exportSelected start', { tabId, count: sessionIds.length });
 
-    // 获取页面真实请求配置 + 分页拉取全部会话
-    const allSessionsData = await sendToTab<{
-      sessions: SessionSummary[];
+    // 获取页面真实请求配置（history 重放模板 + fetch_page 兜底）
+    const tpl = await sendToTab<{
       fetchPageRequest?: CapturedApiRequest;
       historyRequest?: CapturedApiRequest;
     }>(tabId, { type: 'EXPORT_ALL' });
 
-    const sessions = await fetchAllSessions(tabId, allSessionsData.fetchPageRequest);
+    // 会话摘要优先取缓存，缺失时重新拉取全量列表
+    let source = sessionCache;
+    const missing = sessionIds.filter((id) => !source.some((s) => s.id === id));
+    if (missing.length > 0) {
+      logger.info('exportSelected: cache missing ids, reloading list', { missing: missing.length });
+      source = await fetchAllSessions(tabId, tpl.fetchPageRequest);
+      sessionCache = source;
+      sessionCacheTime = Date.now();
+    }
+    const selected = sessionIds
+      .map((id) => source.find((s) => s.id === id))
+      .filter((s): s is SessionSummary => Boolean(s));
 
-    if (sessions.length === 0) {
-      logger.warn('exportAll: no sessions found');
-      sendResponse({ error: '未找到会话，请先在 DeepSeek 页面浏览或刷新后重试' });
+    if (selected.length === 0) {
+      sendResponse({ error: '未找到所选会话，请刷新列表后重试' });
       return;
     }
 
     const conversations: Conversation[] = [];
-    const totalSessions = sessions.length;
+    const totalSessions = selected.length;
     const failed: string[] = [];
 
     // 逐个拉取历史消息并限速
-    for (let i = 0; i < sessions.length; i++) {
-      const session = sessions[i];
+    for (let i = 0; i < selected.length; i++) {
+      const session = selected[i];
 
       exportProgress = Math.round((i / totalSessions) * 100);
       exportCurrent = { index: i + 1, total: totalSessions, title: session.title || 'Untitled' };
@@ -486,7 +606,12 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
       try {
         const result = chrome.runtime.sendMessage({
           type: 'EXPORT_PROGRESS',
-          payload: { progress: exportProgress, current: i + 1, total: totalSessions, title: session.title || 'Untitled' },
+          payload: {
+            progress: exportProgress,
+            current: i + 1,
+            total: totalSessions,
+            title: session.title || 'Untitled',
+          },
         } as ExtensionMessage);
         if (result && typeof result.catch === 'function') {
           result.catch(() => {});
@@ -496,39 +621,43 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
       }
 
       try {
-        const historyData = await fetchHistoryMessages(tabId, session.id, allSessionsData.historyRequest);
+        const historyData = await fetchHistoryMessages(tabId, session.id, tpl.historyRequest);
 
         if (historyData) {
           const conversation = buildConversation(session, historyData, (_msg, sample) => {
             logger.error('消息正文提取失败（消息结构样本）', { sessionId: session.id, sample });
           });
           conversations.push(conversation);
-          logger.debug('exportAll session ok', {
+          logger.debug('exportSelected session ok', {
             i,
             id: session.id,
             messages: historyData.length,
           });
         } else {
           failed.push(session.id);
-          logger.warn('exportAll session empty history', { i, id: session.id });
+          logger.warn('exportSelected session empty history', { i, id: session.id });
         }
 
         // 每 5 个请求暂停 800ms，防止触发风控
-        if ((i + 1) % 5 === 0 && i < sessions.length - 1) {
+        if ((i + 1) % 5 === 0 && i < selected.length - 1) {
           await sleep(800);
         }
       } catch (error) {
         failed.push(session.id);
-        logger.error('exportAll session failed', { i, id: session.id, error: String(error) });
+        logger.error('exportSelected session failed', { i, id: session.id, error: String(error) });
         // 单个会话失败不中断整体导出
       }
     }
 
     const exportData = buildExportJSON(conversations);
 
-    const filename = generateFilename('deepseek-all-conversations');
+    const filename = generateFilename(
+      selected.length > 3
+        ? 'deepseek-conversations'
+        : `deepseek-conversations-${selected.length}`
+    );
     await triggerDownload(exportData, filename, tabId);
-    logger.info('exportAll download triggered', {
+    logger.info('exportSelected download triggered', {
       filename,
       conversations: conversations.length,
       failed: failed.length,
@@ -542,9 +671,148 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
     exportInProgress = false;
     exportProgress = 0;
     exportCurrent = null;
-    logger.error('exportAll failed', String(error));
+    logger.error('exportSelected failed', String(error));
     sendResponse({ error: String(error) });
   }
+}
+
+/**
+ * 批量删除会话（学习式：重放用户在页面手动删除时捕获的真实请求）。
+ * 逐个会话执行（避免批量语义差异导致误删），每个请求间限速。
+ */
+async function deleteSessions(sessionIds: string[], sendResponse: (response: any) => void) {
+  if (!deleteTemplate) {
+    sendResponse({
+      error:
+        '删除接口尚未学习：请先在 DeepSeek 页面上手动删除任意一个会话，扩展会自动捕获该操作，之后即可批量删除',
+    });
+    return;
+  }
+
+  const tabId = await getActiveDeepSeekTabId();
+  if (!tabId) {
+    sendResponse({ error: '未找到 DeepSeek 标签页，请先打开 chat.deepseek.com' });
+    return;
+  }
+
+  if (!sessionIds || sessionIds.length === 0) {
+    sendResponse({ error: '未选择任何会话' });
+    return;
+  }
+
+  try {
+    exportInProgress = true;
+    exportProgress = 0;
+    logger.warn('deleteSessions start（不可逆操作）', {
+      count: sessionIds.length,
+      url: deleteTemplate.url,
+      method: deleteTemplate.method,
+    });
+
+    const total = sessionIds.length;
+    let ok = 0;
+    const failed: string[] = [];
+
+    for (let i = 0; i < sessionIds.length; i++) {
+      const id = sessionIds[i];
+
+      exportProgress = Math.round((i / total) * 100);
+      exportCurrent = { index: i + 1, total, title: `删除 ${id.slice(0, 8)}` };
+
+      try {
+        // 重放删除请求：把 body 中的会话 ID 替换为当前目标
+        const delReq = buildDeleteRequest(deleteTemplate, [id]);
+        await proxyRequest(tabId, delReq);
+        ok++;
+        // 从缓存移除已删除会话
+        sessionCache = sessionCache.filter((s) => s.id !== id);
+        logger.info('deleteSessions deleted', { i, id });
+      } catch (error) {
+        failed.push(id);
+        logger.error('deleteSessions failed', { i, id, error: String(error) });
+        // 单个失败不中断
+      }
+
+      // 向 popup 广播进度
+      try {
+        const result = chrome.runtime.sendMessage({
+          type: 'EXPORT_PROGRESS',
+          payload: {
+            progress: exportProgress,
+            current: i + 1,
+            total,
+            title: `删除 ${id.slice(0, 8)}`,
+          },
+        } as ExtensionMessage);
+        if (result && typeof result.catch === 'function') {
+          result.catch(() => {});
+        }
+      } catch {
+        // 忽略广播失败
+      }
+
+      // 每 5 个请求暂停 800ms
+      if ((i + 1) % 5 === 0 && i < total - 1) {
+        await sleep(800);
+      }
+    }
+
+    exportInProgress = false;
+    exportProgress = 100;
+    exportCurrent = null;
+    logger.warn('deleteSessions finished', { ok, failed: failed.length });
+    sendResponse({ success: true, ok, failed: failed.length });
+  } catch (error) {
+    exportInProgress = false;
+    exportProgress = 0;
+    exportCurrent = null;
+    logger.error('deleteSessions failed', String(error));
+    sendResponse({ error: String(error) });
+  }
+}
+
+/**
+ * 构造删除请求：重放学习到的模板，把 body 中的会话 ID 替换为目标 ID。
+ */
+function buildDeleteRequest(
+  template: CapturedApiRequest,
+  sessionIds: string[]
+): CapturedApiRequest {
+  let body = template.body;
+  if (body) {
+    try {
+      const replaced = replaceUuids(JSON.parse(body), sessionIds);
+      body = JSON.stringify(replaced);
+    } catch (error) {
+      logger.error('删除模板 body 解析失败', String(error));
+    }
+  }
+  return { kind: 'delete', url: template.url, method: template.method, body };
+}
+
+/**
+ * 深度遍历 JSON 结构，把 UUID 字符串替换为目标会话 ID：
+ * - 单个 UUID 字符串 → 替换为第一个目标 ID
+ * - UUID 数组 → 替换为全部目标 ID
+ */
+function replaceUuids(node: unknown, sessionIds: string[]): unknown {
+  if (typeof node === 'string') {
+    return UUID_RE.test(node) ? sessionIds[0] : node;
+  }
+  if (Array.isArray(node)) {
+    if (node.some((x) => typeof x === 'string' && UUID_RE.test(x))) {
+      return sessionIds;
+    }
+    return node.map((x) => replaceUuids(x, sessionIds));
+  }
+  if (typeof node === 'object' && node !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(node)) {
+      out[k] = replaceUuids(v, sessionIds);
+    }
+    return out;
+  }
+  return node;
 }
 
 /**

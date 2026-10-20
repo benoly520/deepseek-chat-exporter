@@ -198,16 +198,24 @@ function handleCapturedData(type: string, data: unknown) {
     } else if (type === 'api_request') {
       // 记录页面真实请求配置（method/url/body），供 SW 代理重放
       const req = data as CapturedApiRequest;
-      // 同 URL 去重，最新在前，每类最多保留 10 条
+      // 同 URL+method 去重，最新在前
       capturedRequests = [req, ...capturedRequests.filter(
-        (r) => !(r.kind === req.kind && r.url === req.url)
-      )].slice(0, 20);
+        (r) => !(r.kind === req.kind && r.url === req.url && r.body === req.body)
+      )].slice(0, 50);
       logger.info('API request captured', {
         kind: req.kind,
         method: req.method,
         url: req.url,
         hasBody: Boolean(req.body),
       });
+
+      // 删除请求捕获：通知 SW 学习删除接口模板（批量删除据此重放）
+      if (req.kind === 'delete') {
+        notifyBackground({
+          type: 'DELETE_REQUEST_CAPTURED',
+          payload: req,
+        });
+      }
     } else if (type === 'api_parse_error') {
       // hook 层 JSON 解析失败（响应非 JSON），记录响应片段辅助诊断
       const info = data as { kind: string; status: number; error: string; snippet: string };
