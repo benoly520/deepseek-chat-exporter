@@ -38,6 +38,20 @@
     dispatchDataEvent('api_url', url);
   }
 
+  /**
+   * 捕获目标 API 的完整请求配置（url / method / body），
+   * 供 SW 代理"原样重放"——真实端点可能是 GET + query 参数，不能想当然用 POST。
+   */
+  function noteApiRequest(url: string, method: string, body?: string) {
+    if (!isSessionListApi(url) && !isHistoryApi(url)) return;
+    dispatchDataEvent('api_request', {
+      kind: isSessionListApi(url) ? 'fetchPage' : 'history',
+      url,
+      method: method.toUpperCase(),
+      body: typeof body === 'string' && body ? body : undefined,
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // fetch 拦截
   // ---------------------------------------------------------------------------
@@ -50,8 +64,11 @@
     const url = typeof input === 'string'
       ? input
       : input instanceof Request ? input.url : String(input);
+    const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+    const reqBody = typeof init?.body === 'string' ? init.body : undefined;
 
     noteApiUrl(url);
+    noteApiRequest(url, method, reqBody);
 
     // 提取 Authorization 头（Request 对象或 init.headers 均可能携带）
     const authHeader = readHeader(input, init, 'authorization');
@@ -120,9 +137,10 @@
   // XMLHttpRequest 拦截（兜底：部分前端栈不走 fetch）
   // ---------------------------------------------------------------------------
 
-  XHR.open = function(this: XMLHttpRequest & { __dsUrl?: string }, ...args: any[]) {
+  XHR.open = function(this: XMLHttpRequest & { __dsUrl?: string; __dsMethod?: string }, ...args: any[]) {
     const url = args[1];
     this.__dsUrl = typeof url === 'string' ? url : String(url);
+    this.__dsMethod = String(args[0] || 'GET');
     return (originalXhrOpen as any).apply(this, args);
   };
 
@@ -134,9 +152,13 @@
     return (originalXhrSetHeader as any).call(this, name, value);
   };
 
-  XHR.send = function(this: XMLHttpRequest & { __dsUrl?: string }, ...sendArgs: any[]) {
+  XHR.send = function(this: XMLHttpRequest & { __dsUrl?: string; __dsMethod?: string }, ...sendArgs: any[]) {
     const url: string = this.__dsUrl || '';
+    const method = this.__dsMethod || 'GET';
+    const rawBody = sendArgs[0];
+    const body = typeof rawBody === 'string' ? rawBody : undefined;
     noteApiUrl(url);
+    noteApiRequest(url, method, body);
 
     if (isSessionListApi(url) || isHistoryApi(url)) {
       this.addEventListener('load', () => {

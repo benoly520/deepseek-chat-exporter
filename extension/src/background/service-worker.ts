@@ -13,6 +13,7 @@ import type {
   RawMessage,
   SessionSummary,
   FetchProxyPayload,
+  CapturedApiRequest,
 } from '../types';
 import { buildExportJSON, buildConversation } from '../utils/json-builder';
 import { triggerDownload, generateFilename } from '../utils/downloader';
@@ -142,16 +143,22 @@ async function sendToTab<T = any>(tabId: number, message: ExtensionMessage): Pro
  * 通过 content script 代理执行 DeepSeek API 请求。
  * service worker 直接 fetch 无法携带页面的 Bearer Token，
  * 由页面上下文的代理请求补全鉴权。
+ *
+ * 重放策略：method / url / body 与页面真实请求保持一致（避免 405）。
  */
-async function proxyFetch<T>(tabId: number, url: string, body: unknown): Promise<T> {
-  const payload: FetchProxyPayload = { url, body };
+async function proxyRequest<T>(tabId: number, req: CapturedApiRequest): Promise<T> {
+  const payload: FetchProxyPayload = {
+    url: req.url,
+    method: req.method,
+    body: req.body,
+  };
   const result = await sendToTab<{ data?: T; error?: string }>(tabId, {
     type: 'FETCH_PROXY',
     payload,
   });
 
   if (result?.error) {
-    logger.error('Proxy fetch returned error', { url, error: result.error });
+    logger.error('Proxy request returned error', { url: req.url, method: req.method, error: result.error });
     throw new Error(result.error);
   }
   return result.data as T;
@@ -160,35 +167,36 @@ async function proxyFetch<T>(tabId: number, url: string, body: unknown): Promise
 /**
  * 游标分页拉取全部会话列表。
  *
+ * 代理策略：原样重放页面实际发出的请求（method/url/body 一致，避免 405）。
+ * 若响应中能提取到游标字段则继续翻页，否则停在已捕获的第一页。
+ *
  * @param tabId 目标标签页
- * @param fetchPageUrl 页面实际调用的 fetch_page 端点（从捕获的 api_url 中取得，
- *                     可能带版本前缀；缺省时回退到硬编码地址）
+ * @param fetchPageRequest 页面实际请求配置（缺省时回退硬编码 POST）
  */
 async function fetchAllSessions(
   tabId: number,
-  fetchPageUrl?: string
+  fetchPageRequest?: CapturedApiRequest
 ): Promise<SessionSummary[]> {
   const sessions: SessionSummary[] = [];
   const seen = new Set<string>();
-  let cursor = '';
   let page = 0;
   const MAX_PAGES = 100; // 防御性上限，避免异常响应导致死循环
 
-  // 优先使用页面真实端点，避免硬编码 URL 与实际 API 版本不符（返回 HTML）
-  const url = fetchPageUrl || `${API_BASE}/api/chat_session/fetch_page`;
-  logger.info('fetchAllSessions start', { url });
+  // 请求配置：优先重放页面真实请求
+  let req: CapturedApiRequest = fetchPageRequest || {
+    kind: 'fetchPage',
+    url: `${API_BASE}/api/chat_session/fetch_page`,
+    method: 'POST',
+    body: JSON.stringify({ cursor: '', limit: SESSION_PAGE_SIZE, order_by: 'updated_at', direction: 'DESC' }),
+  };
+  logger.info('fetchAllSessions start', { url: req.url, method: req.method });
 
   while (page < MAX_PAGES) {
     let data: SessionListResponse;
     try {
-      data = await proxyFetch<SessionListResponse>(tabId, url, {
-        cursor,
-        limit: SESSION_PAGE_SIZE,
-        order_by: 'updated_at',
-        direction: 'DESC',
-      });
+      data = await proxyRequest<SessionListResponse>(tabId, req);
     } catch (error) {
-      logger.error('fetchAllSessions page failed', { page, cursor, error: String(error) });
+      logger.error('fetchAllSessions page failed', { page, url: req.url, error: String(error) });
       throw error;
     }
 
@@ -198,6 +206,17 @@ async function fetchAllSessions(
     if (!extracted) {
       logger.error('fetchAllSessions 响应解析失败（结构不符）', structure.keys);
       throw new Error('会话列表响应结构无法解析');
+    }
+
+    // 记录响应顶层结构，便于确认 v0 API 的游标字段名
+    try {
+      const dataKeys =
+        typeof data === 'object' && data !== null
+          ? `top=[${Object.keys(data)}] data=[${Object.keys((data as any).data || {})}]`
+          : String(typeof data);
+      logger.debug('fetch_page response structure', { page, ...{ keys: dataKeys } });
+    } catch {
+      // 结构日志失败不影响主流程
     }
 
     const pageSessions = extracted.sessions;
@@ -216,10 +235,24 @@ async function fetchAllSessions(
       nextCursor: nextCursor || '(empty)',
     });
 
+    // 无游标字段时停止（v0 API 游标字段名待日志确认后再适配翻页）
     if (!nextCursor || pageSessions.length === 0) {
       break;
     }
-    cursor = nextCursor;
+
+    // 用提取到的游标构造下一页请求：GET 请求拼到 query，POST 请求替换 body 中的 cursor
+    if (req.method === 'GET') {
+      const sep = req.url.includes('?') ? '&' : '?';
+      req = { ...req, url: `${req.url}${sep}cursor=${encodeURIComponent(nextCursor)}` };
+    } else {
+      try {
+        const bodyObj = req.body ? JSON.parse(req.body) : {};
+        bodyObj.cursor = nextCursor;
+        req = { ...req, body: JSON.stringify(bodyObj) };
+      } catch {
+        break;
+      }
+    }
     page++;
 
     // 翻页间限速，防止触发风控
@@ -231,22 +264,53 @@ async function fetchAllSessions(
 }
 
 /**
+ * 构造指定会话的历史消息请求：
+ * 重放页面真实请求，但替换 chat_session_id 为目标会话，并去掉
+ * cache_version / cache_reset_at（客户端缓存参数，会导致返回空消息）。
+ */
+function buildHistoryRequest(historyReq: CapturedApiRequest | undefined, sessionId: string): CapturedApiRequest {
+  if (!historyReq) {
+    // 无捕获请求时回退到已知端点（GET，参数在 query 上）
+    return {
+      kind: 'history',
+      url: `${API_BASE}/api/v0/chat/history_messages?chat_session_id=${encodeURIComponent(sessionId)}`,
+      method: 'GET',
+    };
+  }
+
+  try {
+    const u = new URL(historyReq.url, 'https://chat.deepseek.com');
+    u.searchParams.set('chat_session_id', sessionId);
+    u.searchParams.delete('cache_version');
+    u.searchParams.delete('cache_reset_at');
+    return {
+      kind: 'history',
+      url: u.pathname + u.search,
+      method: historyReq.method,
+      body: historyReq.body
+        ? JSON.stringify({ ...JSON.parse(historyReq.body), chat_session_id: sessionId })
+        : undefined,
+    };
+  } catch {
+    return { kind: 'history', url: historyReq.url, method: historyReq.method, body: historyReq.body };
+  }
+}
+
+/**
  * 拉取指定会话的完整历史消息。
  *
  * @param tabId 目标标签页
  * @param sessionId 会话 ID
- * @param historyUrl 页面实际调用的 history_messages 端点（缺省时回退硬编码）
+ * @param historyRequest 页面实际请求配置（用于构造目标会话的请求）
  */
 async function fetchHistoryMessages(
   tabId: number,
   sessionId: string,
-  historyUrl?: string
+  historyRequest?: CapturedApiRequest
 ): Promise<RawMessage[] | null> {
-  const url = historyUrl || `${API_BASE}/api/chat/history_messages`;
+  const req = buildHistoryRequest(historyRequest, sessionId);
   try {
-    const data = await proxyFetch<HistoryMessagesResponse>(tabId, url, {
-      session_id: sessionId,
-    });
+    const data = await proxyRequest<HistoryMessagesResponse>(tabId, req);
 
     // 容错提取消息数组（兼容多种响应结构）
     const structure: { keys: string } = { keys: '' };
@@ -259,7 +323,7 @@ async function fetchHistoryMessages(
     logger.debug('fetchHistoryMessages done', { sessionId, count: messages.length });
     return messages;
   } catch (error) {
-    logger.error('fetchHistoryMessages failed', { sessionId, error: String(error) });
+    logger.error('fetchHistoryMessages failed', { sessionId, url: req.url, error: String(error) });
     return null;
   }
 }
@@ -280,11 +344,11 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
     exportProgress = 0;
     logger.info('exportCurrent start', { tabId });
 
-    // 获取当前会话 ID 与已捕获的消息（含页面真实 API 端点）
+    // 获取当前会话 ID 与已捕获的消息（含页面真实请求配置）
     const sessionData = await sendToTab<{
       sessionId: string;
       messages: RawMessage[];
-      historyUrl?: string;
+      historyRequest?: CapturedApiRequest;
       error?: string;
     }>(tabId, { type: 'EXPORT_CURRENT' });
 
@@ -295,22 +359,20 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
 
     const sessionId = sessionData.sessionId;
 
-    // 优先通过代理拉取完整历史（用页面真实端点），失败时退回已捕获消息
-    const messages =
-      (await fetchHistoryMessages(tabId, sessionId, sessionData.historyUrl)) ||
-      sessionData.messages ||
-      [];
+    // 优先通过代理拉取完整历史（重放页面请求），失败或为空时退回已捕获消息
+    const proxied = await fetchHistoryMessages(tabId, sessionId, sessionData.historyRequest);
+    const captured = sessionData.messages || [];
+    const messages = proxied && proxied.length > 0 ? proxied : captured.length > 0 ? captured : proxied || [];
     logger.info('exportCurrent history ready', {
       sessionId,
-      historyUrl: sessionData.historyUrl || '(hardcoded)',
+      source: proxied && proxied.length > 0 ? 'proxy' : 'captured',
       count: messages.length,
-      fallbackToCaptured: sessionData.historyUrl ? undefined : true,
     });
 
     // 拉取会话元数据（标题等），失败时使用占位信息
     let sessionInfo: SessionSummary | null = null;
     try {
-      const list = await fetchAllSessions(tabId, sessionData.historyUrl);
+      const list = await fetchAllSessions(tabId);
       sessionInfo = list.find((s) => s.id === sessionId) || null;
       logger.info('exportCurrent session info', {
         found: Boolean(sessionInfo),
@@ -358,14 +420,14 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
     exportProgress = 0;
     logger.info('exportAll start', { tabId });
 
-    // 获取页面真实 API 端点 + 分页拉取全部会话
+    // 获取页面真实请求配置 + 分页拉取全部会话
     const allSessionsData = await sendToTab<{
       sessions: SessionSummary[];
-      fetchPageUrl?: string;
-      historyUrl?: string;
+      fetchPageRequest?: CapturedApiRequest;
+      historyRequest?: CapturedApiRequest;
     }>(tabId, { type: 'EXPORT_ALL' });
 
-    const sessions = await fetchAllSessions(tabId, allSessionsData.fetchPageUrl);
+    const sessions = await fetchAllSessions(tabId, allSessionsData.fetchPageRequest);
 
     if (sessions.length === 0) {
       logger.warn('exportAll: no sessions found');
@@ -397,7 +459,7 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
       }
 
       try {
-        const historyData = await fetchHistoryMessages(tabId, session.id, allSessionsData.historyUrl);
+        const historyData = await fetchHistoryMessages(tabId, session.id, allSessionsData.historyRequest);
 
         if (historyData) {
           const conversation = buildConversation(session, historyData);

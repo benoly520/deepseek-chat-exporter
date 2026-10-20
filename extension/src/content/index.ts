@@ -12,6 +12,7 @@ import type {
   StatusPayload,
   SessionSummary,
   FetchProxyPayload,
+  CapturedApiRequest,
   RawMessage,
 } from '../types';
 
@@ -28,6 +29,9 @@ let hookInstalled = false;
 let authToken = '';
 // 诊断用：最近捕获的 /api/ 请求 URL（最新在前，去重，最多 20 条）
 let recentApiUrls: string[] = [];
+// 页面真实请求配置（method/url/body），SW 代理据此原样重放
+// fetch_page 保留最近若干个（用户滚动列表时页面会带不同游标请求）
+let capturedRequests: CapturedApiRequest[] = [];
 
 /**
  * 初始化 content script。
@@ -191,6 +195,19 @@ function handleCapturedData(type: string, data: unknown) {
       const url = String(data);
       logger.debug('API url', url);
       recentApiUrls = [url, ...recentApiUrls.filter((u) => u !== url)].slice(0, 20);
+    } else if (type === 'api_request') {
+      // 记录页面真实请求配置（method/url/body），供 SW 代理重放
+      const req = data as CapturedApiRequest;
+      // 同 URL 去重，最新在前，每类最多保留 10 条
+      capturedRequests = [req, ...capturedRequests.filter(
+        (r) => !(r.kind === req.kind && r.url === req.url)
+      )].slice(0, 20);
+      logger.info('API request captured', {
+        kind: req.kind,
+        method: req.method,
+        url: req.url,
+        hasBody: Boolean(req.body),
+      });
     } else if (type === 'api_parse_error') {
       // hook 层 JSON 解析失败（响应非 JSON），记录响应片段辅助诊断
       const info = data as { kind: string; status: number; error: string; snippet: string };
@@ -278,23 +295,27 @@ function mergeSessions(
  * Authorization Token，由这里代为请求并返回 JSON）。
  */
 async function proxyFetch(payload: FetchProxyPayload): Promise<unknown> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
+  const method = (payload.method || 'GET').toUpperCase();
+  const headers: Record<string, string> = {};
+  if (payload.body) {
+    headers['Content-Type'] = 'application/json';
+  }
   if (authToken) {
     headers['Authorization'] = authToken;
   }
 
-  logger.info('Proxy fetch start', {
+  logger.info('Proxy request start', {
     url: payload.url,
+    method,
     body: payload.body,
     withToken: Boolean(authToken),
   });
 
   const response = await fetch(payload.url, {
-    method: 'POST',
+    method,
     headers,
-    body: JSON.stringify(payload.body),
+    // 重放页面请求：GET 不带 body，POST 透传原始 body 字符串
+    body: method === 'GET' || !payload.body ? undefined : String(payload.body),
     credentials: 'include',
   });
 
@@ -335,12 +356,10 @@ async function proxyFetch(payload: FetchProxyPayload): Promise<unknown> {
 }
 
 /**
- * 从最近捕获的 API URL 中找出指定后缀的真实端点。
- * 页面实际调用的 URL 可能带版本前缀（如 /api/v0/...），
- * SW 代理请求必须使用真实 URL，不能自己拼。
+ * 从捕获的请求配置中找出指定类型的最新一条。
  */
-function findCapturedUrl(suffix: string): string | undefined {
-  return recentApiUrls.find((u) => u.includes(suffix));
+function findRequest(kind: 'fetchPage' | 'history'): CapturedApiRequest | undefined {
+  return capturedRequests.find((r) => r.kind === kind);
 }
 
 /**
@@ -393,14 +412,17 @@ function handleMessage(message: ExtensionMessage, sendResponse: (response?: any)
     sendResponse({
       sessionId: currentSessionId,
       messages: capturedMessages,
-      historyUrl: findCapturedUrl('history_messages'),
+      historyRequest: findRequest('history'),
     });
   } else if (message.type === 'EXPORT_ALL') {
-    logger.info('EXPORT_ALL requested', { capturedSessions: capturedSessions.length });
+    logger.info('EXPORT_ALL requested', {
+      capturedSessions: capturedSessions.length,
+      fetchPageRequests: capturedRequests.filter((r) => r.kind === 'fetchPage').length,
+    });
     sendResponse({
       sessions: capturedSessions,
-      fetchPageUrl: findCapturedUrl('chat_session/fetch_page'),
-      historyUrl: findCapturedUrl('history_messages'),
+      fetchPageRequest: findRequest('fetchPage'),
+      historyRequest: findRequest('history'),
     });
   } else if (message.type === 'FETCH_PROXY') {
     proxyFetch(message.payload as FetchProxyPayload)

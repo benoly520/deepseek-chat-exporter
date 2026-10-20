@@ -128,7 +128,16 @@ export interface StatusPayload {
 /** FETCH_PROXY 消息载荷：由 service worker 发起、content script 在页面上下文代为执行 */
 export interface FetchProxyPayload {
   url: string;
-  body: unknown;
+  body?: unknown;
+  method?: string;
+}
+
+/** hook 捕获的页面 API 请求配置（SW 代理据此原样重放） */
+export interface CapturedApiRequest {
+  kind: 'fetchPage' | 'history';
+  url: string;
+  method: string;
+  body?: string;
 }
 
 // --- 自定义事件类型 ---
