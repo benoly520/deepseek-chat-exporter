@@ -125,6 +125,14 @@ function handleCapturedData(type: string, data: unknown) {
       // 记录最近的 /api/ 请求 URL，供 popup 诊断展示
       const url = String(data);
       recentApiUrls = [url, ...recentApiUrls.filter((u) => u !== url)].slice(0, 20);
+    } else if (type === 'api_parse_error') {
+      // hook 层 JSON 解析失败（响应非 JSON），记录响应片段辅助诊断
+      const info = data as { kind: string; status: number; error: string; snippet: string };
+      logger.error(`hook 响应 JSON 解析失败（${info.kind}）`, {
+        status: info.status,
+        error: info.error,
+        bodySnippet: info.snippet,
+      });
     } else if (type === 'session_list') {
       const structure: { keys: string } = { keys: '' };
       const extracted = extractSessions(data, structure);
@@ -137,6 +145,7 @@ function handleCapturedData(type: string, data: unknown) {
       // 按 id 合并，跨页累积会话列表
       capturedSessions = mergeSessions(capturedSessions, extracted.sessions);
       logger.info('Session list captured', {
+        matched: structure.keys,
         page: extracted.sessions.length,
         total: capturedSessions.length,
         nextCursor: extracted.nextCursor || '(empty)',
@@ -156,7 +165,11 @@ function handleCapturedData(type: string, data: unknown) {
       }
 
       capturedMessages = messages;
-      logger.info('History messages captured', { count: capturedMessages.length });
+      logger.info('History messages captured', {
+        matched: structure.keys,
+        count: capturedMessages.length,
+        sampleRoles: messages.slice(0, 3).map((m) => m.role),
+      });
 
       notifyBackground({
         type: 'HISTORY_MESSAGES',

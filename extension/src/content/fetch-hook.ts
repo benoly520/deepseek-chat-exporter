@@ -173,7 +173,8 @@
       const data = await response.json();
       dispatchDataEvent('session_list', data);
     } catch (error) {
-      console.error('[DeepSeek Exporter] Failed to parse session list:', error);
+      // 上报响应片段，供 content script 记入诊断日志
+      await reportParseError('session_list', response, error);
     }
   }
 
@@ -185,8 +186,27 @@
       const data = await response.json();
       dispatchDataEvent('history_messages', data);
     } catch (error) {
-      console.error('[DeepSeek Exporter] Failed to parse history messages:', error);
+      await reportParseError('history_messages', response, error);
     }
+  }
+
+  /**
+   * JSON 解析失败时上报错误与响应体片段（hook 自身无日志通道，借 CustomEvent 外传）。
+   */
+  async function reportParseError(kind: string, response: Response, error: unknown) {
+    console.error('[DeepSeek Exporter] Failed to parse', kind, error);
+    let snippet = '';
+    try {
+      snippet = (await response.text()).slice(0, 800);
+    } catch {
+      snippet = '(body unavailable)';
+    }
+    dispatchDataEvent('api_parse_error', {
+      kind,
+      status: response.status,
+      error: String(error),
+      snippet,
+    });
   }
 
   /**

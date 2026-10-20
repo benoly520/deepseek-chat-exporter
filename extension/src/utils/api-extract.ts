@@ -78,28 +78,36 @@ function findArray<T>(
  * 已知尝试路径：data.messages / data.data.messages / data.biz_data.chat_messages /
  * data.biz_data.messages / data.data.chat_messages，失败后递归兜底。
  *
- * @param structureOut 可选，用于回传"未找到时的结构线索"（顶层与二级 keys / 预览）
+ * @param structureOut 回传结构信息：成功时为命中的路径，失败时为结构详情（用于日志诊断）
  */
 export function extractMessages(
   data: unknown,
   structureOut?: { keys: string }
 ): RawMessage[] | null {
-  const known = [
-    'messages',
-    'chat_messages',
-    'items',
+  const known = ['messages', 'chat_messages', 'items'];
+  const paths: string[][] = [
+    ['data', 'messages'],
+    ['data', 'chat_messages'],
+    ['data', 'biz_data', 'chat_messages'],
+    ['data', 'biz_data', 'messages'],
+    ['messages'],
   ];
-  const direct =
-    findArray<RawMessage>(data, looksLikeMessage, known) ??
-    // 显式尝试常见嵌套路径（即使空数组也能命中）
-    tryPaths<RawMessage[]>(data, [
-      ['data', 'messages'],
-      ['data', 'chat_messages'],
-      ['data', 'biz_data', 'chat_messages'],
-      ['data', 'biz_data', 'messages'],
-      ['messages'],
-    ]);
-  if (direct) return direct;
+
+  // 1) 显式路径（即使空数组也命中），记录命中路径
+  for (const path of paths) {
+    const arr = getAtPath(data, path);
+    if (Array.isArray(arr)) {
+      if (structureOut) structureOut.keys = `matched=data.${path.join('.')}`;
+      return arr as RawMessage[];
+    }
+  }
+
+  // 2) 递归兜底：找元素形如消息的数组
+  const deep = findArray<RawMessage>(data, looksLikeMessage, known);
+  if (deep) {
+    if (structureOut) structureOut.keys = 'matched=<deep-scan: role+content array>';
+    return deep;
+  }
 
   if (structureOut) {
     structureOut.keys = describeStructure(data);
@@ -109,22 +117,43 @@ export function extractMessages(
 
 /**
  * 从 fetch_page 响应中提取会话列表与游标。
+ *
+ * @param structureOut 回传结构信息：成功时为命中的路径，失败时为结构详情
  */
 export function extractSessions(
   data: unknown,
   structureOut?: { keys: string }
 ): { sessions: SessionSummary[]; nextCursor: string } | null {
   const known = ['sessions', 'items', 'list'];
-  const sessions =
-    findArray<SessionSummary>(data, looksLikeSession, known) ??
-    tryPaths<SessionSummary[]>(data, [
-      ['data', 'sessions'],
-      ['data', 'items'],
-      ['sessions'],
-    ]);
+  const paths: string[][] = [
+    ['data', 'sessions'],
+    ['data', 'items'],
+    ['sessions'],
+  ];
+
+  let sessions: SessionSummary[] | null = null;
+  let matched = '';
+
+  for (const path of paths) {
+    const arr = getAtPath(data, path);
+    if (Array.isArray(arr)) {
+      sessions = arr as SessionSummary[];
+      matched = `data.${path.join('.')}`;
+      break;
+    }
+  }
+
+  if (!sessions) {
+    const deep = findArray<SessionSummary>(data, looksLikeSession, known);
+    if (deep) {
+      sessions = deep;
+      matched = '<deep-scan: id+title array>';
+    }
+  }
 
   if (sessions) {
     const nextCursor = findString(data, 'next_cursor') || findString(data, 'cursor');
+    if (structureOut) structureOut.keys = `matched=${matched}`;
     return { sessions, nextCursor };
   }
 
@@ -135,24 +164,17 @@ export function extractSessions(
 }
 
 /**
- * 按路径链依次取值，全部存在才返回。
+ * 按路径链依次取值，全部存在才返回（不要求最终为数组，由调用方判断）。
  */
-function tryPaths<T>(root: unknown, paths: string[][]): T | null {
-  for (const path of paths) {
-    let cur: unknown = root;
-    let ok = true;
-    for (const key of path) {
-      if (typeof cur !== 'object' || cur === null || !(key in cur)) {
-        ok = false;
-        break;
-      }
-      cur = (cur as Record<string, unknown>)[key];
+function getAtPath(root: unknown, path: string[]): unknown {
+  let cur: unknown = root;
+  for (const key of path) {
+    if (typeof cur !== 'object' || cur === null || !(key in cur)) {
+      return undefined;
     }
-    if (ok && Array.isArray(cur)) {
-      return cur as T;
-    }
+    cur = (cur as Record<string, unknown>)[key];
   }
-  return null;
+  return cur;
 }
 
 /**
@@ -170,19 +192,41 @@ function findString(root: unknown, key: string, depth = 0): string {
   return '';
 }
 
+/** 失败诊断时 JSON 预览的最大长度（保证能看清完整结构） */
+const STRUCTURE_PREVIEW_MAX = 2000;
+
 /**
- * 描述响应结构（顶层/二级 keys + 截断预览），用于失败诊断。
+ * 描述响应结构（多层 keys + 截断 JSON 预览），用于失败诊断。
  */
 function describeStructure(data: unknown): string {
   try {
-    const topKeys =
-      typeof data === 'object' && data !== null ? Object.keys(data).join(',') : typeof data;
-    const second =
-      typeof data === 'object' && data !== null && 'data' in (data as Record<string, unknown>)
-        ? ` data.keys=${Object.keys((data as Record<string, unknown>).data || {}).join(',')}`
-        : '';
-    const preview = JSON.stringify(data).slice(0, 300);
-    return `topKeys=${topKeys}${second} preview=${preview}`;
+    const parts: string[] = [];
+
+    // 逐层 keys（最多 3 层），看清嵌套骨架
+    let level = 0;
+    let cur = data;
+    while (typeof cur === 'object' && cur !== null && !Array.isArray(cur) && level < 3) {
+      const keys = Object.keys(cur);
+      parts.push(`L${level}.keys=[${keys.join(',')}]`);
+      // 进入第一个"像数据容器"的子对象继续
+      const containerKey = keys.find((k) => {
+        const v = (cur as Record<string, unknown>)[k];
+        return typeof v === 'object' && v !== null && !Array.isArray(v);
+      });
+      if (!containerKey) break;
+      cur = (cur as Record<string, unknown>)[containerKey];
+      level++;
+    }
+
+    // JSON 预览（截断），保留数组元素样例
+    const json = JSON.stringify(data);
+    if (json.length <= STRUCTURE_PREVIEW_MAX) {
+      parts.push(`json=${json}`);
+    } else {
+      parts.push(`json(${json.length}chars)=${json.slice(0, STRUCTURE_PREVIEW_MAX)}…`);
+    }
+
+    return parts.join(' ');
   } catch {
     return '(unserializable)';
   }
