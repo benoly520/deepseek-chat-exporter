@@ -53,8 +53,9 @@ export interface SessionSummary {
   id: string;
   title: string;
   model?: string;
-  created_at?: string;
-  updated_at?: string;
+  /** v0 API 返回秒级数字时间戳，旧结构可能为 ISO 字符串，展示层负责归一化 */
+  created_at?: string | number;
+  updated_at?: string | number;
 }
 
 export interface HistoryMessagesResponse {

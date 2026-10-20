@@ -40,6 +40,60 @@ const logsText = signal('');
 /** 扩展版本号（从 manifest 读取，日志头与界面展示共用） */
 const extVersion = chrome.runtime.getManifest().version;
 
+// --- 确认弹窗（替代 window.confirm，风格与 popup 统一） ---
+
+/** 弹窗是否可见 */
+const confirmVisible = signal(false);
+/** 弹窗正文 */
+const confirmText = signal('');
+/** 待 resolve 的回调（confirmDialog 返回的 Promise） */
+let confirmResolve: ((ok: boolean) => void) | null = null;
+
+/**
+ * 弹出风格统一的确认框，返回用户是否确认。
+ */
+function confirmDialog(text: string): Promise<boolean> {
+  confirmText.set(text);
+  confirmVisible.set(true);
+  return new Promise((resolve) => {
+    confirmResolve = resolve;
+  });
+}
+
+/**
+ * 处理确认框按钮点击（取消 / 确认），关闭弹窗并兑现 Promise。
+ */
+function answerConfirm(ok: boolean) {
+  confirmVisible.set(false);
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  resolve?.(ok);
+}
+
+/**
+ * 归一化会话时间字段并格式化为本地 "YYYY-MM-DD HH:mm"，取不到返回空串。
+ */
+function formatSessionDate(s: SessionSummary): string {
+  const raw = s.updated_at ?? s.created_at;
+  if (raw === undefined || raw === null || raw === '') return '';
+  let ms: number;
+  if (typeof raw === 'number') {
+    // 秒级时间戳（>1e12 视为毫秒）
+    ms = raw > 1e12 ? raw : raw * 1000;
+  } else if (/^\d+(\.\d+)?$/.test(raw)) {
+    const n = Number(raw);
+    ms = n > 1e12 ? n : n * 1000;
+  } else {
+    const d = new Date(raw);
+    if (isNaN(d.getTime())) return '';
+    ms = d.getTime();
+  }
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 /**
  * 构造日志文本头部（版本号 + 导出时间 + 条数），便于定位用户环境。
  */
@@ -212,7 +266,11 @@ async function deleteSelected() {
     );
     return;
   }
-  if (!window.confirm(`确认删除 ${ids.length} 个会话？此操作不可恢复！`)) {
+  if (
+    !(await confirmDialog(
+      `即将永久删除 ${ids.length} 个会话，此操作不可恢复！确认继续？`
+    ))
+  ) {
     return;
   }
   showMessage('', false);
@@ -365,14 +423,16 @@ function InfoItem(props: { label: string; value: string }) {
 }
 
 /**
- * 会话列表条目（勾选框 + 标题）。
+ * 会话列表条目（编号 + 勾选框 + 标题 + 日期）。
  */
-function SessionItem(props: { session: SessionSummary }) {
+function SessionItem(props: { session: SessionSummary; index: number }) {
   const s = () => resolve(props.session);
   const checked = () => selected().has(s().id);
+  const date = () => formatSessionDate(s());
 
   return (
     <label class="session-item">
+      <span class="session-index">{props.index + 1}</span>
       <input
         type="checkbox"
         checked={checked()}
@@ -381,6 +441,7 @@ function SessionItem(props: { session: SessionSummary }) {
       <span class="session-title" title={s().title}>
         {s().title || 'Untitled'}
       </span>
+      {date() ? <span class="session-date">{date()}</span> : null}
     </label>
   );
 }
@@ -421,8 +482,8 @@ function SessionListPanel() {
         <div class="list-loading">点击「刷新列表」加载会话</div>
       ) : (
         <div class="session-list">
-          {list().map((s) => (
-            <SessionItem session={s} />
+          {list().map((s, i) => (
+            <SessionItem session={s} index={i} />
           ))}
         </div>
       )}
@@ -560,6 +621,26 @@ export function App() {
       ) : null}
 
       <LogsPanel />
+
+      {/* 确认弹窗（删除等不可逆操作） */}
+      {confirmVisible() ? (
+        <div class="modal-mask">
+          <div class="modal">
+            <div class="modal-title">删除确认</div>
+            <div class="modal-text">
+              <span class="modal-warn">⚠ {confirmText()}</span>
+            </div>
+            <div class="modal-actions">
+              <button class="modal-btn" onClick={() => answerConfirm(false)}>
+                取消
+              </button>
+              <button class="modal-btn danger" onClick={() => answerConfirm(true)}>
+                确认删除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

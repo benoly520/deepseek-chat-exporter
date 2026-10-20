@@ -151,8 +151,8 @@
     .session-item {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
+      gap: 6px;
+      padding: 6px 8px;
       border-bottom: 1px solid #f3f4f6;
       cursor: pointer;
       font-size: 13px;
@@ -162,11 +162,27 @@
       background: #f0f4ff;
     }
 
+    .session-item .session-index {
+      flex-shrink: 0;
+      min-width: 22px;
+      text-align: right;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 10px;
+      color: #9ca3af;
+    }
+
     .session-item .session-title {
       flex: 1;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .session-item .session-date {
+      flex-shrink: 0;
+      font-size: 10px;
+      color: #9ca3af;
+      font-variant-numeric: tabular-nums;
     }
 
     .btn-danger {
@@ -374,6 +390,74 @@
       white-space: pre-wrap;
       word-break: break-all;
       color: #334155;
+    }
+
+    /* ---------- 确认弹窗（风格与 popup 统一） ---------- */
+    .modal-mask {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+
+    .modal {
+      width: 260px;
+      background: #ffffff;
+      border-radius: 10px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+      padding: 14px;
+    }
+
+    .modal-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #111827;
+      margin-bottom: 8px;
+    }
+
+    .modal-text {
+      font-size: 12px;
+      line-height: 1.5;
+      color: #374151;
+      margin-bottom: 14px;
+    }
+
+    .modal-warn {
+      color: #b91c1c;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .modal-btn {
+      flex: 1;
+      border: 1px solid #e5e7eb;
+      background: #f9fafb;
+      color: #374151;
+      border-radius: 6px;
+      font-size: 13px;
+      padding: 7px 0;
+      cursor: pointer;
+    }
+
+    .modal-btn:hover {
+      border-color: #9ca3af;
+    }
+
+    .modal-btn.danger {
+      background: #ef4444;
+      border-color: #ef4444;
+      color: #ffffff;
+    }
+
+    .modal-btn.danger:hover {
+      background: #dc2626;
+      border-color: #dc2626;
     }
 
       /* ---------- 滚动条（隐藏三角箭头，圆角半透明滑块） ---------- */
