@@ -39,6 +39,9 @@ function init() {
     readyState: document.readyState,
   });
 
+  // 捕获页面内所有未处理异常（含 fetch hook 的错误），记入诊断日志
+  setupGlobalErrorHandlers();
+
   // 注入 fetch hook 到 MAIN world
   injectFetchHook();
 
@@ -74,6 +77,68 @@ function init() {
   });
 
   logger.info('Content script initialized');
+}
+
+// 未捕获异常的去重记录：相同 key 30 秒内只记一次，重复次数每满 10 次汇总一条
+const errorDedupe = new Map<string, { count: number; last: number }>();
+
+/**
+ * 判断错误来源是否为扩展自身脚本（hook 注入页面 MAIN world，同属一个 window）。
+ */
+function isOwnScript(filename: string): boolean {
+  return filename.includes('fetch-hook.js') || filename.includes('content/index.js');
+}
+
+/**
+ * 全局错误处理：把 window 'error' 与 'unhandledrejection' 记入日志。
+ * 这与 chrome://extensions 错误页看到的是同一类信息，可直接从日志导出排查。
+ * 页面自身的错误也会被记录（标 ours=false），但做了去重降噪。
+ */
+function setupGlobalErrorHandlers() {
+  window.addEventListener('error', (e) => {
+    const filename = e.filename || '';
+    const key = `error:${e.message}:${filename}:${e.lineno}`;
+    reportDeduped(key, {
+      msg: e.message,
+      file: filename.split('/').pop() || '',
+      line: e.lineno,
+      col: e.colno,
+      ours: isOwnScript(filename) || e.message.includes('DeepSeek Exporter'),
+    }, `未捕获异常`);
+  });
+
+  window.addEventListener('unhandledrejection', (e) => {
+    const reason = e.reason instanceof Error ? `${e.reason.message}\n${e.reason.stack || ''}` : String(e.reason);
+    // 取 reason 的前 300 字符做去重 key（避免动态内容导致不去重）
+    const key = `rejection:${reason.slice(0, 300)}`;
+    reportDeduped(key, { reason: reason.slice(0, 1000) }, `未处理的 Promise rejection`);
+  });
+}
+
+/**
+ * 去重上报：相同错误短时间内只记录一次，重复次数每满 10 次汇总一条。
+ */
+function reportDeduped(key: string, detail: unknown, label: string) {
+  const now = Date.now();
+  const DEDUP_WINDOW = 30_000;
+
+  const prev = errorDedupe.get(key);
+  if (prev && now - prev.last < DEDUP_WINDOW) {
+    prev.count++;
+    prev.last = now;
+    if (prev.count % 10 === 0) {
+      logger.warn(`${label}（已重复 ${prev.count} 次）`, detail);
+    }
+    return;
+  }
+
+  errorDedupe.set(key, { count: 1, last: now });
+  if (errorDedupe.size > 50) {
+    // 防止 Map 无限增长
+    const oldest = errorDedupe.keys().next().value;
+    if (oldest) errorDedupe.delete(oldest);
+  }
+  logger.error(label, detail);
 }
 
 /**

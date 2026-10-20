@@ -433,3 +433,13 @@ function sleep(ms: number): Promise<void> {
 chrome.runtime.onInstalled.addListener((details) => {
   logger.info('Extension installed/updated', details.reason);
 });
+
+// SW 上下文的未处理 Promise rejection 记入日志
+// （chrome://extensions 错误页里的 SW 崩溃大多源于此）
+(self as any).addEventListener('unhandledrejection', (e: PromiseRejectionEvent) => {
+  const reason =
+    e.reason instanceof Error
+      ? `${e.reason.message}\n${e.reason.stack || ''}`
+      : String(e.reason);
+  logger.error('未处理的 Promise rejection', reason.slice(0, 1000));
+});
