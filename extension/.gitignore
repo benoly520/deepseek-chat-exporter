@@ -4,6 +4,7 @@ node_modules/
 # 构建产物（可用 npm run build 重建）
 dist/
 
-# 日志与临时文件
+# 日志与临时文件（含导出的聊天数据，隐私不入库）
 *.log
 .DS_Store
+.tmp/

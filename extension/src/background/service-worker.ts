@@ -183,7 +183,9 @@ async function proxyRequest<T>(tabId: number, req: CapturedApiRequest): Promise<
  * 游标分页拉取全部会话列表。
  *
  * 代理策略：原样重放页面实际发出的请求（method/url/body 一致，避免 405）。
- * 若响应中能提取到游标字段则继续翻页，否则停在已捕获的第一页。
+ * v0 API 响应无 next_cursor 游标字段，但页面自身的翻页方式是 keyset 游标：
+ * 在 query 上追加 lte_cursor.updated_at=<上一页最后一条会话的 updated_at>，
+ * 这里复刻该方式实现真实翻页。
  *
  * @param tabId 目标标签页
  * @param fetchPageRequest 页面实际请求配置（缺省时回退硬编码 POST）
@@ -195,7 +197,7 @@ async function fetchAllSessions(
   const sessions: SessionSummary[] = [];
   const seen = new Set<string>();
   let page = 0;
-  const MAX_PAGES = 100; // 防御性上限，避免异常响应导致死循环
+  const MAX_PAGES = 200; // 防御性上限，避免异常响应导致死循环
 
   // 请求配置：优先重放页面真实请求
   let req: CapturedApiRequest = fetchPageRequest || {
@@ -223,51 +225,49 @@ async function fetchAllSessions(
       throw new Error('会话列表响应结构无法解析');
     }
 
-    // 记录响应顶层结构，便于确认 v0 API 的游标字段名
-    try {
-      const dataKeys =
-        typeof data === 'object' && data !== null
-          ? `top=[${Object.keys(data)}] data=[${Object.keys((data as any).data || {})}]`
-          : String(typeof data);
-      logger.debug('fetch_page response structure', { page, ...{ keys: dataKeys } });
-    } catch {
-      // 结构日志失败不影响主流程
+    const pageSessions = extracted.sessions;
+    if (pageSessions.length === 0) {
+      logger.info('fetchAllSessions reached end (empty page)', { page, total: sessions.length });
+      break;
     }
 
-    const pageSessions = extracted.sessions;
+    const before = sessions.length;
     for (const s of pageSessions) {
       if (!seen.has(s.id)) {
         seen.add(s.id);
         sessions.push(s);
       }
     }
+    const added = sessions.length - before;
 
-    const nextCursor = extracted.nextCursor;
     logger.info('fetchAllSessions page done', {
       page,
       got: pageSessions.length,
+      added,
       total: sessions.length,
-      nextCursor: nextCursor || '(empty)',
     });
 
-    // 无游标字段时停止（v0 API 游标字段名待日志确认后再适配翻页）
-    if (!nextCursor || pageSessions.length === 0) {
+    // 本页没有新会话：说明已到末尾（游标可能未生效），防死循环
+    if (added === 0) {
+      logger.info('fetchAllSessions reached end (no new sessions)', { page, total: sessions.length });
       break;
     }
 
-    // 用提取到的游标构造下一页请求：GET 请求拼到 query，POST 请求替换 body 中的 cursor
-    if (req.method === 'GET') {
-      const sep = req.url.includes('?') ? '&' : '?';
-      req = { ...req, url: `${req.url}${sep}cursor=${encodeURIComponent(nextCursor)}` };
-    } else {
-      try {
-        const bodyObj = req.body ? JSON.parse(req.body) : {};
-        bodyObj.cursor = nextCursor;
-        req = { ...req, body: JSON.stringify(bodyObj) };
-      } catch {
-        break;
-      }
+    // keyset 翻页：用本页最后一条会话的 updated_at 作为 lte_cursor.updated_at
+    // （DeepSeek 页面滚动加载下一页时正是这种请求形式）
+    const last = pageSessions[pageSessions.length - 1] as unknown as Record<string, unknown>;
+    const lastUpdated = last?.updated_at;
+    if (typeof lastUpdated !== 'number' && typeof lastUpdated !== 'string') {
+      logger.warn('fetchAllSessions 无法构造下一页游标（末条缺 updated_at），停止翻页', {
+        lastKeys: Object.keys(last || {}).join(','),
+      });
+      break;
     }
+
+    req = {
+      ...req,
+      url: upsertQueryParam(req.url, 'lte_cursor.updated_at', String(lastUpdated)),
+    };
     page++;
 
     // 翻页间限速，防止触发风控
@@ -276,6 +276,21 @@ async function fetchAllSessions(
 
   logger.info('fetchAllSessions finished', { total: sessions.length, pages: page + 1 });
   return sessions;
+}
+
+/**
+ * 在 URL 的 query 中插入或替换指定参数（兼容相对路径），返回 pathname+search。
+ */
+function upsertQueryParam(url: string, key: string, value: string): string {
+  try {
+    const u = new URL(url, 'https://chat.deepseek.com');
+    u.searchParams.set(key, value);
+    return u.pathname + u.search;
+  } catch {
+    // URL 解析失败时退回简单拼接
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+  }
 }
 
 /**
