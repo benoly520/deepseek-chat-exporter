@@ -31,6 +31,15 @@
       font-size: 16px;
       font-weight: 600;
       color: #111827;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+
+    .header .version {
+      font-size: 11px;
+      font-weight: 400;
+      color: #9ca3af;
     }
 
     .status {
@@ -262,51 +271,82 @@
       color: #991b1b;
     }
 
-    .debug {
-      margin-top: 8px;
-      font-size: 12px;
-      color: #6b7280;
-    }
-
-    .debug summary {
-      cursor: pointer;
-      user-select: none;
-    }
-
-    .debug ul {
-      margin: 6px 0 0;
-      padding-left: 16px;
-      max-height: 140px;
-      overflow-y: auto;
-    }
-
-    .debug li {
-      font-family: monospace;
-      font-size: 11px;
-      word-break: break-all;
-      padding: 1px 0;
-    }
-
-    .logs {
+    /* ---------- 可折叠面板（诊断 / 日志统一风格） ---------- */
+    .collapsible {
       margin-top: 10px;
-      font-size: 12px;
-      color: #6b7280;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #ffffff;
+      overflow: hidden;
     }
 
-    .logs summary {
+    .collapsible > summary {
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 10px;
+      font-size: 12px;
+      color: #6b7280;
       cursor: pointer;
       user-select: none;
+    }
+
+    .collapsible > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .collapsible > summary:hover {
+      color: #3b82f6;
+    }
+
+    /* 展开 / 收起箭头：SVG 雪佛龙，收起朝右、展开旋转 90° 朝下 */
+    .collapsible > summary::before {
+      content: '';
+      width: 12px;
+      height: 12px;
+      flex-shrink: 0;
+      background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M9 6l6 6-6 6'/></svg>") center/contain no-repeat;
+      transition: transform 0.15s ease;
+    }
+
+    .collapsible[open] > summary::before {
+      transform: rotate(90deg);
+    }
+
+    .collapsible[open] > summary {
+      border-bottom: 1px solid #e5e7eb;
+      background: #f9fafb;
+    }
+
+    .collapsible-body {
+      background: #ffffff;
+    }
+
+    .url-list {
+      margin: 0;
+      padding: 8px 10px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 10px;
+      color: #334155;
+      word-break: break-all;
+    }
+
+    .url-list li {
+      padding: 1px 0;
     }
 
     .logs-actions {
       display: flex;
       gap: 6px;
-      margin-top: 6px;
+      padding: 8px 8px 0;
     }
 
     .log-btn {
       flex: 1;
-      border: 1px solid var(--color-border, #e5e7eb);
+      border: 1px solid #e5e7eb;
       background: #f9fafb;
       color: #374151;
       border-radius: 4px;
@@ -321,7 +361,7 @@
     }
 
     .logs-view {
-      margin: 6px 0 0;
+      margin: 8px;
       padding: 8px;
       max-height: 180px;
       overflow-y: auto;

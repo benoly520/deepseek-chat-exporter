@@ -37,6 +37,16 @@ const listLoaded = signal(0);
 /** 汇总日志文本（从 service worker 拉取） */
 const logsText = signal('');
 
+/** 扩展版本号（从 manifest 读取，日志头与界面展示共用） */
+const extVersion = chrome.runtime.getManifest().version;
+
+/**
+ * 构造日志文本头部（版本号 + 导出时间 + 条数），便于定位用户环境。
+ */
+function buildLogsHeader(entryCount: number): string {
+  return `DeepSeek Chat Exporter v${extVersion} · 导出时间 ${new Date().toLocaleString()} · 共 ${entryCount} 条日志`;
+}
+
 /** 进度区标题：批量操作显示 N/总数 + 会话标题，单会话导出显示百分比 */
 const progressTitle = computed(() => {
   const cur = status().exportCurrent;
@@ -240,13 +250,17 @@ async function loadLogs() {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_LOGS' });
     if (response?.error) {
-      logsText.set(`日志拉取失败: ${response.error}`);
+      logsText.set(`DeepSeek Chat Exporter v${extVersion} · 日志拉取失败: ${response.error}`);
     } else {
       const entries = (response?.entries || []) as LogEntry[];
-      logsText.set(entries.length > 0 ? formatAll(entries) : '暂无日志');
+      logsText.set(
+        entries.length > 0
+          ? `${buildLogsHeader(entries.length)}\n${formatAll(entries)}`
+          : `${buildLogsHeader(0)}\n暂无日志`
+      );
     }
   } catch (error) {
-    logsText.set(`日志拉取失败: ${String(error)}`);
+    logsText.set(`DeepSeek Chat Exporter v${extVersion} · 日志拉取失败: ${String(error)}`);
   }
 }
 
@@ -256,7 +270,7 @@ async function loadLogs() {
 async function downloadLogs() {
   try {
     const text = logsText();
-    if (!text || text === '暂无日志') {
+    if (!text || text.endsWith('暂无日志')) {
       await loadLogs();
     }
     const blob = new Blob([logsText()], { type: 'text/plain;charset=utf-8' });
@@ -278,7 +292,7 @@ async function downloadLogs() {
  */
 async function copyLogs() {
   try {
-    if (!logsText() || logsText() === '暂无日志') {
+    if (!logsText() || logsText().endsWith('暂无日志')) {
       await loadLogs();
     }
     await navigator.clipboard.writeText(logsText());
@@ -294,7 +308,7 @@ async function copyLogs() {
 async function clearLogs() {
   try {
     await chrome.runtime.sendMessage({ type: 'CLEAR_LOGS' });
-    logsText.set('暂无日志');
+    logsText.set(`${buildLogsHeader(0)}\n暂无日志`);
     showMessage('日志已清空', false);
   } catch (error) {
     showMessage(`日志清空失败: ${String(error)}`, true);
@@ -422,7 +436,7 @@ function SessionListPanel() {
 function LogsPanel() {
   return (
     <details
-      class="logs"
+      class="collapsible"
       ref={(el) => {
         // 首次展开时拉取日志
         const handler = () => {
@@ -435,13 +449,15 @@ function LogsPanel() {
       }}
     >
       <summary>运行日志（排查问题用）</summary>
-      <div class="logs-actions">
-        <button class="log-btn" onClick={loadLogs}>刷新</button>
-        <button class="log-btn" onClick={downloadLogs}>下载日志</button>
-        <button class="log-btn" onClick={copyLogs}>拷贝</button>
-        <button class="log-btn" onClick={clearLogs}>清空</button>
+      <div class="collapsible-body">
+        <div class="logs-actions">
+          <button class="log-btn" onClick={loadLogs}>刷新</button>
+          <button class="log-btn" onClick={downloadLogs}>下载日志</button>
+          <button class="log-btn" onClick={copyLogs}>拷贝</button>
+          <button class="log-btn" onClick={clearLogs}>清空</button>
+        </div>
+        <pre class="logs-view">{logsText() || '点「刷新」加载日志'}</pre>
       </div>
-      <pre class="logs-view">{logsText() || '点「刷新」加载日志'}</pre>
     </details>
   );
 }
@@ -467,7 +483,10 @@ export function App() {
       }}
     >
       <div class="header">
-        <h1>DeepSeek Exporter</h1>
+        <h1>
+          DeepSeek Exporter
+          <span class="version">v{extVersion}</span>
+        </h1>
         <div class={s().connected ? 'status connected' : 'status'}>
           {s().connected ? '已连接' : '未连接'}
         </div>
@@ -528,13 +547,15 @@ export function App() {
       ) : null}
 
       {s().recentApiUrls && s().recentApiUrls!.length > 0 ? (
-        <details class="debug">
+        <details class="collapsible">
           <summary>API 捕获诊断 ({s().recentApiUrls!.length})</summary>
-          <ul>
-            {s().recentApiUrls!.map((u) => (
-              <li>{u}</li>
-            ))}
-          </ul>
+          <div class="collapsible-body">
+            <ul class="url-list">
+              {s().recentApiUrls!.map((u) => (
+                <li>{u}</li>
+              ))}
+            </ul>
+          </div>
         </details>
       ) : null}
 

@@ -29,6 +29,9 @@ const logStore = new LogStore();
 // 尽早开始恢复历史日志
 logStore.init();
 
+// 记录 SW 启动与版本号，便于排查用户实际安装的版本
+logger.info('Service worker started', { version: chrome.runtime.getManifest().version });
+
 // 状态
 let exportInProgress = false;
 let exportProgress = 0;
@@ -826,7 +829,10 @@ function sleep(ms: number): Promise<void> {
  * 扩展安装 / 更新时提示。
  */
 chrome.runtime.onInstalled.addListener((details) => {
-  logger.info('Extension installed/updated', details.reason);
+  logger.info('Extension installed/updated', {
+    reason: details.reason,
+    version: chrome.runtime.getManifest().version,
+  });
 });
 
 // SW 上下文的未处理 Promise rejection 记入日志
