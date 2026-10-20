@@ -159,20 +159,29 @@ async function proxyFetch<T>(tabId: number, url: string, body: unknown): Promise
 
 /**
  * 游标分页拉取全部会话列表。
+ *
+ * @param tabId 目标标签页
+ * @param fetchPageUrl 页面实际调用的 fetch_page 端点（从捕获的 api_url 中取得，
+ *                     可能带版本前缀；缺省时回退到硬编码地址）
  */
-async function fetchAllSessions(tabId: number): Promise<SessionSummary[]> {
+async function fetchAllSessions(
+  tabId: number,
+  fetchPageUrl?: string
+): Promise<SessionSummary[]> {
   const sessions: SessionSummary[] = [];
   const seen = new Set<string>();
   let cursor = '';
   let page = 0;
   const MAX_PAGES = 100; // 防御性上限，避免异常响应导致死循环
 
-  logger.info('fetchAllSessions start');
+  // 优先使用页面真实端点，避免硬编码 URL 与实际 API 版本不符（返回 HTML）
+  const url = fetchPageUrl || `${API_BASE}/api/chat_session/fetch_page`;
+  logger.info('fetchAllSessions start', { url });
 
   while (page < MAX_PAGES) {
     let data: SessionListResponse;
     try {
-      data = await proxyFetch<SessionListResponse>(tabId, `${API_BASE}/api/chat_session/fetch_page`, {
+      data = await proxyFetch<SessionListResponse>(tabId, url, {
         cursor,
         limit: SESSION_PAGE_SIZE,
         order_by: 'updated_at',
@@ -223,17 +232,21 @@ async function fetchAllSessions(tabId: number): Promise<SessionSummary[]> {
 
 /**
  * 拉取指定会话的完整历史消息。
+ *
+ * @param tabId 目标标签页
+ * @param sessionId 会话 ID
+ * @param historyUrl 页面实际调用的 history_messages 端点（缺省时回退硬编码）
  */
 async function fetchHistoryMessages(
   tabId: number,
-  sessionId: string
+  sessionId: string,
+  historyUrl?: string
 ): Promise<RawMessage[] | null> {
+  const url = historyUrl || `${API_BASE}/api/chat/history_messages`;
   try {
-    const data = await proxyFetch<HistoryMessagesResponse>(
-      tabId,
-      `${API_BASE}/api/chat/history_messages`,
-      { session_id: sessionId }
-    );
+    const data = await proxyFetch<HistoryMessagesResponse>(tabId, url, {
+      session_id: sessionId,
+    });
 
     // 容错提取消息数组（兼容多种响应结构）
     const structure: { keys: string } = { keys: '' };
@@ -267,10 +280,11 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
     exportProgress = 0;
     logger.info('exportCurrent start', { tabId });
 
-    // 获取当前会话 ID 与已捕获的消息
+    // 获取当前会话 ID 与已捕获的消息（含页面真实 API 端点）
     const sessionData = await sendToTab<{
       sessionId: string;
       messages: RawMessage[];
+      historyUrl?: string;
       error?: string;
     }>(tabId, { type: 'EXPORT_CURRENT' });
 
@@ -281,18 +295,22 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
 
     const sessionId = sessionData.sessionId;
 
-    // 优先通过代理拉取完整历史，失败时退回已捕获消息
-    const messages = (await fetchHistoryMessages(tabId, sessionId)) || sessionData.messages || [];
+    // 优先通过代理拉取完整历史（用页面真实端点），失败时退回已捕获消息
+    const messages =
+      (await fetchHistoryMessages(tabId, sessionId, sessionData.historyUrl)) ||
+      sessionData.messages ||
+      [];
     logger.info('exportCurrent history ready', {
       sessionId,
-      source: 'proxy',
+      historyUrl: sessionData.historyUrl || '(hardcoded)',
       count: messages.length,
+      fallbackToCaptured: sessionData.historyUrl ? undefined : true,
     });
 
     // 拉取会话元数据（标题等），失败时使用占位信息
     let sessionInfo: SessionSummary | null = null;
     try {
-      const list = await fetchAllSessions(tabId);
+      const list = await fetchAllSessions(tabId, sessionData.historyUrl);
       sessionInfo = list.find((s) => s.id === sessionId) || null;
       logger.info('exportCurrent session info', {
         found: Boolean(sessionInfo),
@@ -310,7 +328,7 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
     const exportData = buildExportJSON([conversation]);
 
     const filename = generateFilename(`deepseek-session-${sessionId.slice(0, 8)}`);
-    await triggerDownload(exportData, filename);
+    await triggerDownload(exportData, filename, tabId);
     logger.info('exportCurrent download triggered', { filename });
 
     exportInProgress = false;
@@ -340,8 +358,14 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
     exportProgress = 0;
     logger.info('exportAll start', { tabId });
 
-    // 分页拉取全部会话
-    const sessions = await fetchAllSessions(tabId);
+    // 获取页面真实 API 端点 + 分页拉取全部会话
+    const allSessionsData = await sendToTab<{
+      sessions: SessionSummary[];
+      fetchPageUrl?: string;
+      historyUrl?: string;
+    }>(tabId, { type: 'EXPORT_ALL' });
+
+    const sessions = await fetchAllSessions(tabId, allSessionsData.fetchPageUrl);
 
     if (sessions.length === 0) {
       logger.warn('exportAll: no sessions found');
@@ -373,7 +397,7 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
       }
 
       try {
-        const historyData = await fetchHistoryMessages(tabId, session.id);
+        const historyData = await fetchHistoryMessages(tabId, session.id, allSessionsData.historyUrl);
 
         if (historyData) {
           const conversation = buildConversation(session, historyData);
@@ -402,7 +426,7 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
     const exportData = buildExportJSON(conversations);
 
     const filename = generateFilename('deepseek-all-conversations');
-    await triggerDownload(exportData, filename);
+    await triggerDownload(exportData, filename, tabId);
     logger.info('exportAll download triggered', {
       filename,
       conversations: conversations.length,

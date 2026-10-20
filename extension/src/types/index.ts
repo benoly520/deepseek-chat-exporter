@@ -104,7 +104,8 @@ export type MessageType =
   | 'FETCH_PROXY'
   | 'LOG_ENTRY'
   | 'GET_LOGS'
-  | 'CLEAR_LOGS';
+  | 'CLEAR_LOGS'
+  | 'DOWNLOAD_BLOB';
 
 export interface ExtensionMessage {
   type: MessageType;

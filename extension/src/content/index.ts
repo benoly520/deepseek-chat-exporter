@@ -187,8 +187,9 @@ function handleCapturedData(type: string, data: unknown) {
       authToken = String(data);
       logger.info('Auth token captured');
     } else if (type === 'api_url') {
-      // 记录最近的 /api/ 请求 URL，供 popup 诊断展示
+      // 记录最近的 /api/ 请求 URL，供 popup 诊断展示与 SW 代理复用真实端点
       const url = String(data);
+      logger.debug('API url', url);
       recentApiUrls = [url, ...recentApiUrls.filter((u) => u !== url)].slice(0, 20);
     } else if (type === 'api_parse_error') {
       // hook 层 JSON 解析失败（响应非 JSON），记录响应片段辅助诊断
@@ -234,6 +235,7 @@ function handleCapturedData(type: string, data: unknown) {
         matched: structure.keys,
         count: capturedMessages.length,
         sampleRoles: messages.slice(0, 3).map((m) => m.role),
+        firstKeys: messages[0] ? Object.keys(messages[0]).join(',') : '(empty)',
       });
 
       notifyBackground({
@@ -305,9 +307,58 @@ async function proxyFetch(payload: FetchProxyPayload): Promise<unknown> {
     throw new Error(`API ${response.status}: ${response.statusText}`);
   }
 
-  const json = await response.json();
-  logger.debug('Proxy fetch ok', payload.url);
-  return json;
+  // JSON 解析失败时记录响应片段（比如误打到了前端路由返回的 HTML）
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await response.text();
+    logger.error('Proxy fetch 返回非 JSON 响应', {
+      url: payload.url,
+      contentType,
+      bodySnippet: text.slice(0, 500),
+    });
+    throw new Error(`响应非 JSON（content-type: ${contentType}），URL 可能不正确`);
+  }
+
+  try {
+    const json = await response.json();
+    logger.debug('Proxy fetch ok', payload.url);
+    return json;
+  } catch (error) {
+    const text = await response.text().catch(() => '(unavailable)');
+    logger.error('Proxy fetch JSON 解析失败', {
+      url: payload.url,
+      error: String(error),
+      bodySnippet: text.slice(0, 500),
+    });
+    throw error;
+  }
+}
+
+/**
+ * 从最近捕获的 API URL 中找出指定后缀的真实端点。
+ * 页面实际调用的 URL 可能带版本前缀（如 /api/v0/...），
+ * SW 代理请求必须使用真实 URL，不能自己拼。
+ */
+function findCapturedUrl(suffix: string): string | undefined {
+  return recentApiUrls.find((u) => u.includes(suffix));
+}
+
+/**
+ * 在页面上下文创建 Blob URL 并通过 <a download> 触发下载。
+ * （MV3 SW 中没有 URL.createObjectURL，大文件由这里兜底下载）
+ */
+function downloadBlob(filename: string, json: string): void {
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // 等下载任务接管 Blob URL 后再释放
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  logger.info('Blob download triggered', { filename, size: json.length });
 }
 
 /**
@@ -342,17 +393,29 @@ function handleMessage(message: ExtensionMessage, sendResponse: (response?: any)
     sendResponse({
       sessionId: currentSessionId,
       messages: capturedMessages,
+      historyUrl: findCapturedUrl('history_messages'),
     });
   } else if (message.type === 'EXPORT_ALL') {
     logger.info('EXPORT_ALL requested', { capturedSessions: capturedSessions.length });
     sendResponse({
       sessions: capturedSessions,
+      fetchPageUrl: findCapturedUrl('chat_session/fetch_page'),
+      historyUrl: findCapturedUrl('history_messages'),
     });
   } else if (message.type === 'FETCH_PROXY') {
     proxyFetch(message.payload as FetchProxyPayload)
       .then((data) => sendResponse({ data }))
       .catch((error) => sendResponse({ error: String(error) }));
     // 异步响应，保持通道打开
+  } else if (message.type === 'DOWNLOAD_BLOB') {
+    const { filename, json } = message.payload as { filename: string; json: string };
+    try {
+      downloadBlob(filename, json);
+      sendResponse({ success: true });
+    } catch (error) {
+      logger.error('Blob download failed', String(error));
+      sendResponse({ error: String(error) });
+    }
   }
 }
 
