@@ -335,6 +335,10 @@ async function proxyFetch(payload: FetchProxyPayload): Promise<unknown> {
       status: response.status,
       statusText: response.statusText,
     });
+    // 401/403：大概率未登录或登录已过期，直接给出可操作的提示
+    if (response.status === 401 || response.status === 403) {
+      throw new Error('未登录或登录已过期，请先登录 chat.deepseek.com 后重试');
+    }
     throw new Error(`API ${response.status}: ${response.statusText}`);
   }
 
@@ -347,6 +351,10 @@ async function proxyFetch(payload: FetchProxyPayload): Promise<unknown> {
       contentType,
       bodySnippet: text.slice(0, 500),
     });
+    // API 返回 HTML：结合 token 缺失或页面特征判断为未登录（被重定向到登录页）
+    if (!authToken || /<html|login/i.test(text.slice(0, 1000))) {
+      throw new Error('未登录或登录已过期，请先登录 chat.deepseek.com 后重试');
+    }
     throw new Error(`响应非 JSON（content-type: ${contentType}），URL 可能不正确`);
   }
 
