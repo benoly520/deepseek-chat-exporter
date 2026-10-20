@@ -1,0 +1,196 @@
+/**
+ * Popup 主界面（plain 实现）。
+ * 状态：与 background 轮询同步的连接状态 / 导出进度 / 提示消息。
+ */
+
+import { signal, resolve } from 'plain';
+import type { StatusPayload, ExtensionMessage } from '../types';
+
+// --- 状态 ---
+
+/** 来自 background 的状态（每 2 秒轮询刷新） */
+const status = signal<StatusPayload>({
+  connected: false,
+  currentSessionId: null,
+  capturedSessions: 0,
+  capturedMessages: 0,
+  exporting: false,
+  exportProgress: 0,
+});
+
+/** 提示消息 */
+const message = signal('');
+/** 提示消息是否为错误 */
+const isError = signal(false);
+
+// 进度监听只注册一次
+let progressListenerAdded = false;
+
+/**
+ * 从 background 获取当前状态。
+ */
+async function fetchStatus() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_STATUS' });
+    // 无响应（如 service worker 刚被唤醒）时保持默认状态
+    if (response) {
+      status.set(response);
+    }
+  } catch (error) {
+    console.error('Failed to fetch status:', error);
+  }
+}
+
+/**
+ * 设置提示消息。
+ */
+function showMessage(text: string, error: boolean) {
+  message.set(text);
+  isError.set(error);
+}
+
+/**
+ * 导出当前会话。
+ */
+async function exportCurrent() {
+  showMessage('', false);
+
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'EXPORT_CURRENT' });
+
+    if (!response) {
+      throw new Error('无响应，请刷新页面后重试');
+    }
+    if (response.error) {
+      showMessage(`导出失败: ${response.error}`, true);
+    } else {
+      showMessage(`导出成功: ${response.filename}`, false);
+    }
+  } catch (error) {
+    showMessage(`导出失败: ${String(error)}`, true);
+  } finally {
+    const s = status.peek();
+    status.set({ ...s, exporting: false, exportProgress: 0 });
+  }
+}
+
+/**
+ * 批量导出全部会话。
+ */
+async function exportAll() {
+  showMessage('', false);
+
+  try {
+    // 注册进度监听（仅注册一次，避免重复监听）
+    if (!progressListenerAdded) {
+      chrome.runtime.onMessage.addListener((msg: ExtensionMessage) => {
+        if (msg.type === 'EXPORT_PROGRESS') {
+          const payload = msg.payload as { progress: number } | undefined;
+          if (payload) {
+            const s = status.peek();
+            status.set({ ...s, exportProgress: payload.progress });
+          }
+        }
+      });
+      progressListenerAdded = true;
+    }
+
+    const response = await chrome.runtime.sendMessage({ type: 'EXPORT_ALL' });
+
+    if (!response) {
+      throw new Error('无响应，请刷新页面后重试');
+    }
+    if (response.error) {
+      showMessage(`导出失败: ${response.error}`, true);
+    } else {
+      showMessage(`导出成功: ${response.filename} (${response.count} 个会话)`, false);
+    }
+  } catch (error) {
+    showMessage(`导出失败: ${String(error)}`, true);
+  } finally {
+    const s = status.peek();
+    status.set({ ...s, exporting: false, exportProgress: 0 });
+  }
+}
+
+/**
+ * 信息行。
+ */
+function InfoItem(props: { label: string; value: string }) {
+  const value = () => resolve(props.value);
+  return (
+    <div class="info-item">
+      <span class="label">{resolve(props.label)}</span>
+      <span class="value">{value()}</span>
+    </div>
+  );
+}
+
+/**
+ * Popup 根组件。
+ */
+export function App() {
+  const s = status;
+
+  return (
+    <div
+      class="popup"
+      ref={() => {
+        // 轮询状态；返回清理函数，popup 关闭时停止定时器
+        fetchStatus();
+        const timer = setInterval(fetchStatus, 2000);
+        return () => {
+          clearInterval(timer);
+        };
+      }}
+    >
+      <div class="header">
+        <h1>DeepSeek Exporter</h1>
+        <div class={s().connected ? 'status connected' : 'status'}>
+          {s().connected ? '已连接' : '未连接'}
+        </div>
+      </div>
+
+      <div class="info">
+        <InfoItem label="当前会话 ID:" value={s().currentSessionId || '无'} />
+        <InfoItem label="已捕获会话数:" value={String(s().capturedSessions)} />
+        <InfoItem label="已捕获消息数:" value={String(s().capturedMessages)} />
+      </div>
+
+      {s().connected ? null : (
+        <div class="tip">未连接时请刷新 DeepSeek 页面后重试</div>
+      )}
+
+      <div class="actions">
+        <button
+          class="btn btn-primary"
+          disabled={!s().connected || !s().currentSessionId || s().exporting}
+          onClick={exportCurrent}
+        >
+          导出当前会话
+        </button>
+
+        <button
+          class="btn btn-secondary"
+          disabled={!s().connected || s().exporting}
+          onClick={exportAll}
+        >
+          批量导出全部
+        </button>
+      </div>
+
+      {s().exporting ? (
+        <div class="progress">
+          <div class="progress-bar">
+            <div class="progress-fill" style={`width:${s().exportProgress}%`} />
+          </div>
+          <div class="progress-text">{s().exportProgress}%</div>
+        </div>
+      ) : null}
+
+      {message() ? (
+        <div class={isError() ? 'message error' : 'message'}>{message()}</div>
+      ) : null}
+    </div>
+  );
+}

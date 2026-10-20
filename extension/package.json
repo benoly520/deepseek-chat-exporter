@@ -1,0 +1,18 @@
+{
+  "name": "deepseek-chat-exporter",
+  "version": "1.0.0",
+  "description": "Chrome Extension to export DeepSeek chat conversations as structured JSON",
+  "type": "module",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "dependencies": {
+    "plain": "link:/home/monom/dev/gitlab_remote/github/plain-framework"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0"
+  }
+}
