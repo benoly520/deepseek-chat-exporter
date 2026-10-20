@@ -65,12 +65,17 @@ function consolePrint(lv: LogLevel, scope: string, msg: string, data?: unknown) 
 }
 
 /**
- * 创建本地日志器（content / popup 用）。
+ * 创建本地日志器（content / popup / sw 用）。
  *
  * @param scope 作用域标识
  * @param forward 是否转发给 service worker 汇总（content script 传 true）
+ * @param sink 自定义落点（SW 传入 LogStore.add，让自身日志也持久化）
  */
-export function createLocalLogger(scope: string, forward = false) {
+export function createLocalLogger(
+  scope: string,
+  forward = false,
+  sink?: (entry: LogEntry) => void
+) {
   const entries: LogEntry[] = [];
 
   function log(lv: LogLevel, msg: string, data?: unknown) {
@@ -80,7 +85,13 @@ export function createLocalLogger(scope: string, forward = false) {
 
     consolePrint(lv, scope, msg, data);
 
-    if (forward && typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+    if (sink) {
+      try {
+        sink(entry);
+      } catch {
+        // sink 异常不影响主流程
+      }
+    } else if (forward && typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
       try {
         const msgObj: ExtensionMessage = { type: 'LOG_ENTRY', payload: entry };
         const result = chrome.runtime.sendMessage(msgObj);

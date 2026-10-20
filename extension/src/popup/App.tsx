@@ -261,7 +261,10 @@ export function App() {
       </div>
 
       {s().connected ? null : (
-        <div class="tip">未连接时请刷新 DeepSeek 页面后重试</div>
+        <div class="tip">
+          未连接时请刷新 DeepSeek 页面后重试
+          {s().swError ? <div class="tip-detail">原因: {s().swError}</div> : null}
+        </div>
       )}
 
       <div class="actions">

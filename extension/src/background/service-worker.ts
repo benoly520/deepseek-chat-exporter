@@ -18,10 +18,11 @@ import { buildExportJSON, buildConversation } from '../utils/json-builder';
 import { triggerDownload, generateFilename } from '../utils/downloader';
 import { createLocalLogger } from '../utils/logger';
 import { LogStore } from '../utils/log-store';
+import { extractMessages, extractSessions } from '../utils/api-extract';
 import type { LogEntry } from '../utils/logger';
 
-// 日志
-const logger = createLocalLogger('sw');
+// 日志：SW 自身日志通过 sink 直写 logStore，同样持久化、可被 popup 拉取
+const logger = createLocalLogger('sw', false, (entry: LogEntry) => logStore.add(entry));
 // 日志仓库：汇总 content script 转发的日志并持久化
 const logStore = new LogStore();
 // 尽早开始恢复历史日志
@@ -116,17 +117,17 @@ async function getStatus(sendResponse: (response: StatusPayload) => void) {
   const tabId = await getActiveDeepSeekTabId();
   if (!tabId) {
     logger.debug('GET_STATUS: no active DeepSeek tab');
-    sendResponse(idleStatus);
+    sendResponse({ ...idleStatus, swError: '未找到活跃的 DeepSeek 标签页' });
     return;
   }
 
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: 'GET_STATUS' });
-    sendResponse(response ?? idleStatus);
+    sendResponse(response ?? { ...idleStatus, swError: 'content script 空响应' });
   } catch (error) {
     // content script 未注入（页面尚未刷新过）等场景
     logger.warn('GET_STATUS: content script unreachable', String(error));
-    sendResponse(idleStatus);
+    sendResponse({ ...idleStatus, swError: `content script 不可达: ${String(error)}` });
   }
 }
 
@@ -182,7 +183,15 @@ async function fetchAllSessions(tabId: number): Promise<SessionSummary[]> {
       throw error;
     }
 
-    const pageSessions = data?.data?.sessions || [];
+    // 容错提取会话列表（兼容多种响应结构）
+    const structure: { keys: string } = { keys: '' };
+    const extracted = extractSessions(data, structure);
+    if (!extracted) {
+      logger.error('fetchAllSessions 响应解析失败（结构不符）', structure.keys);
+      throw new Error('会话列表响应结构无法解析');
+    }
+
+    const pageSessions = extracted.sessions;
     for (const s of pageSessions) {
       if (!seen.has(s.id)) {
         seen.add(s.id);
@@ -190,7 +199,7 @@ async function fetchAllSessions(tabId: number): Promise<SessionSummary[]> {
       }
     }
 
-    const nextCursor = data?.data?.next_cursor || '';
+    const nextCursor = extracted.nextCursor;
     logger.info('fetchAllSessions page done', {
       page,
       got: pageSessions.length,
@@ -225,8 +234,16 @@ async function fetchHistoryMessages(
       `${API_BASE}/api/chat/history_messages`,
       { session_id: sessionId }
     );
-    const messages = data?.data?.messages || null;
-    logger.debug('fetchHistoryMessages done', { sessionId, count: messages?.length ?? 0 });
+
+    // 容错提取消息数组（兼容多种响应结构）
+    const structure: { keys: string } = { keys: '' };
+    const messages = extractMessages(data, structure);
+    if (!messages) {
+      logger.error('fetchHistoryMessages 响应解析失败（结构不符）', structure.keys);
+      return null;
+    }
+
+    logger.debug('fetchHistoryMessages done', { sessionId, count: messages.length });
     return messages;
   } catch (error) {
     logger.error('fetchHistoryMessages failed', { sessionId, error: String(error) });

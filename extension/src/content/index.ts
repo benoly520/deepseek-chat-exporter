@@ -6,13 +6,13 @@
 
 import { startPageWatcher } from './page-watcher';
 import { createLocalLogger } from '../utils/logger';
+import { extractMessages, extractSessions } from '../utils/api-extract';
 import type {
   ExtensionMessage,
   StatusPayload,
-  SessionListResponse,
-  HistoryMessagesResponse,
   SessionSummary,
   FetchProxyPayload,
+  RawMessage,
 } from '../types';
 
 // 日志器：本地记录 + 转发 SW 汇总
@@ -22,7 +22,7 @@ const logger = createLocalLogger('content', true);
 let currentSessionId: string | null = null;
 // 按 id 合并累积的会话列表（fetch_page 是分页接口，需跨页累积）
 let capturedSessions: SessionSummary[] = [];
-let capturedMessages: HistoryMessagesResponse['data']['messages'] = [];
+let capturedMessages: RawMessage[] = [];
 let hookInstalled = false;
 // 从页面请求中捕获的 Bearer Token，代理请求时附带
 let authToken = '';
@@ -112,53 +112,71 @@ function notifyBackground(message: ExtensionMessage) {
 
 /**
  * 处理 fetch hook 捕获的数据。
+ * 整体包裹 try-catch：任何解析异常都记录到日志，绝不让异常静默丢失计数。
  */
 function handleCapturedData(type: string, data: unknown) {
   logger.debug('Captured data', type);
 
-  if (type === 'auth_token') {
-    authToken = String(data);
-    logger.info('Auth token captured');
-  } else if (type === 'api_url') {
-    // 记录最近的 /api/ 请求 URL，供 popup 诊断展示
-    const url = String(data);
-    recentApiUrls = [url, ...recentApiUrls.filter((u) => u !== url)].slice(0, 20);
-  } else if (type === 'session_list') {
-    const sessionData = data as SessionListResponse;
-    const count = sessionData.data.sessions?.length || 0;
-    // 按 id 合并，跨页累积会话列表
-    capturedSessions = mergeSessions(capturedSessions, sessionData.data.sessions);
-    logger.info('Session list captured', {
-      page: count,
-      total: capturedSessions.length,
-      nextCursor: sessionData.data.next_cursor || '(empty)',
-    });
+  try {
+    if (type === 'auth_token') {
+      authToken = String(data);
+      logger.info('Auth token captured');
+    } else if (type === 'api_url') {
+      // 记录最近的 /api/ 请求 URL，供 popup 诊断展示
+      const url = String(data);
+      recentApiUrls = [url, ...recentApiUrls.filter((u) => u !== url)].slice(0, 20);
+    } else if (type === 'session_list') {
+      const structure: { keys: string } = { keys: '' };
+      const extracted = extractSessions(data, structure);
 
-    notifyBackground({
-      type: 'SESSION_LIST',
-      payload: sessionData,
-    });
-  } else if (type === 'history_messages') {
-    const messageData = data as HistoryMessagesResponse;
-    capturedMessages = messageData.data.messages;
-    logger.info('History messages captured', { count: capturedMessages.length });
+      if (!extracted) {
+        logger.error('session_list 解析失败（结构不符）', structure.keys);
+        return;
+      }
 
-    notifyBackground({
-      type: 'HISTORY_MESSAGES',
-      payload: messageData,
-    });
-  } else if (type === 'sse_complete') {
-    const sse = data as { content?: string; thinking?: string; model?: string };
-    logger.info('SSE stream completed', {
-      contentLen: sse.content?.length || 0,
-      thinkingLen: sse.thinking?.length || 0,
-      model: sse.model || '',
-    });
+      // 按 id 合并，跨页累积会话列表
+      capturedSessions = mergeSessions(capturedSessions, extracted.sessions);
+      logger.info('Session list captured', {
+        page: extracted.sessions.length,
+        total: capturedSessions.length,
+        nextCursor: extracted.nextCursor || '(empty)',
+      });
 
-    notifyBackground({
-      type: 'SSE_COMPLETE',
-      payload: data,
-    });
+      notifyBackground({
+        type: 'SESSION_LIST',
+        payload: data,
+      });
+    } else if (type === 'history_messages') {
+      const structure: { keys: string } = { keys: '' };
+      const messages = extractMessages(data, structure);
+
+      if (!messages) {
+        logger.error('history_messages 解析失败（结构不符）', structure.keys);
+        return;
+      }
+
+      capturedMessages = messages;
+      logger.info('History messages captured', { count: capturedMessages.length });
+
+      notifyBackground({
+        type: 'HISTORY_MESSAGES',
+        payload: data,
+      });
+    } else if (type === 'sse_complete') {
+      const sse = data as { content?: string; thinking?: string; model?: string };
+      logger.info('SSE stream completed', {
+        contentLen: sse.content?.length || 0,
+        thinkingLen: sse.thinking?.length || 0,
+        model: sse.model || '',
+      });
+
+      notifyBackground({
+        type: 'SSE_COMPLETE',
+        payload: data,
+      });
+    }
+  } catch (error) {
+    logger.error(`处理捕获数据时异常（type=${type}）`, String(error));
   }
 }
 
@@ -218,6 +236,8 @@ async function proxyFetch(payload: FetchProxyPayload): Promise<unknown> {
  * 处理来自 background / popup 的消息。
  */
 function handleMessage(message: ExtensionMessage, sendResponse: (response?: any) => void) {
+  logger.debug('handleMessage', message.type);
+
   if (message.type === 'GET_STATUS') {
     const status: StatusPayload = {
       connected: hookInstalled,
