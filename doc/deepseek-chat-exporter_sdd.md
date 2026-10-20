@@ -1,6 +1,6 @@
 # DeepSeek Chat 数据导出与展示工具 — 软件设计文档 (SDD)
 
-> 版本：1.1.0（2026-10-20 修订）
+> 版本：1.2.0（2026-10-20 修订）
 > 本文档由初版 SDD（Vue 3 方案）随实际实现修订而来，描述当前仓库的**真实架构**。
 > 与初版的主要差异：展示端与 Popup UI 统一改用 [plain-framework](https://benoly520.github.io/plain-framework/) 实现，
 > 导出端补充了鉴权代理、游标分页等落地决策，详见「修订记录」。
@@ -13,6 +13,7 @@
 | 1.1.0 | 2026-10-20 | 随迁移重构修订：Popup 与查看器统一改用 plain-framework；修复 popup 白屏 / hook 注入路径 / UUID 正则 / downloads 权限等缺陷；新增 FETCH_PROXY 鉴权代理与游标分页导出 |
 | 1.1.1 | 2026-10-20 | 会话 URL 实际形如 /a/chat/s/{uuid}（含 /s/ 段），修正 page-watcher 正则；API 匹配改为路径后缀式（兼容 /api/v0/... 版本前缀）；新增 XHR 拦截兜底；popup 增加「API 捕获诊断」区块 |
 | 1.1.2 | 2026-10-20 | manifest icons 由 SVG 改为 PNG（Chromium 不支持 SVG 图标，显示为字母占位符）；新增运行日志系统（content/SW 日志汇总持久化，popup 支持拉取 / 下载 / 拷贝 / 清空） |
+| 1.2.0 | 2026-10-20 | Popup 重构为会话管理器（自动加载全部列表 / 编号+日期 / 全选 / 导出选中 / 批量删除）；导出全部突破 100 条限制（keyset 翻页 lte_cursor.updated_at）；新增学习式批量删除（捕获真实删除请求作模板，深度替换 UUID 重放）；GET_STATUS 由 SW 合并权威导出状态（修复进度被轮询覆盖）；消息正文多级提取（v0 片段结构）；日志头带版本号；统一可折叠面板与自定义展开箭头 / 确认弹窗；未登录友好提示 |
 
 ## 1. 项目概述
 
@@ -142,14 +143,22 @@ Authorization: Bearer <token>
   "code": 0,
   "data": {
     "sessions": [
-      { "id": "...", "title": "...", "created_at": "...", "updated_at": "...", "model": "..." }
-    ],
-    "next_cursor": "abc123"   // 为空表示无更多数据
+      { "id": "...", "title": "...", "created_at": 1760000000, "updated_at": 1760000000, "model": "..." }
+    ]
   }
 }
 ```
 
-### 3.4 历史消息 API 详情
+> **翻页要点**：v0 响应实际**没有** `next_cursor` 字段，页面自身翻页用的是 keyset 游标——
+> 在 query 上追加 `lte_cursor.updated_at=<上一页末条 updated_at>`。
+> 扩展复刻该方式实现真实翻页（突破单页数量限制），时间字段为秒级数字时间戳。
+
+### 3.4 删除会话 API（学习式捕获）
+
+删除端点无公开文档且不可逆，扩展**不硬编码**，而是学习式捕获（见 §4.2.6）：
+用户在页面手动删除一次会话，hook 捕获该请求的完整配置（url / method / body）作为模板。
+
+### 3.5 历史消息 API 详情
 
 **请求：**
 
@@ -175,7 +184,7 @@ Authorization: Bearer <token>
 }
 ```
 
-### 3.5 SSE 流式响应
+### 3.6 SSE 流式响应
 
 用户在页面发送新消息时，响应以 SSE 流式返回（`Accept: text/event-stream`）：
 
@@ -227,6 +236,9 @@ extension/
 - 拦截目标：`/api/chat_session/fetch_page`、`/api/chat/history_messages`、
   `Accept: text/event-stream` 的 SSE 请求（兼容 `Request` 对象与 `init.headers` 两种形态）。
 - 同时捕获 `Authorization` 头，经 `__ds_data__` 事件（`auth_token`）上报给 content script。
+- **API 请求捕获分类**（`api_request` 事件，含完整 method/url/body）：
+  `fetchPage` / `history` 供导出重放，`delete`（正则 `chat_session/delete|/delete`）供删除接口学习，
+  其余不捕获避免噪音。
 - 数据经 `CustomEvent('__ds_data__')` 传回 content script，不修改原始响应。
 
 #### 4.2.2 Content Script（`content/index.ts`）
@@ -234,6 +246,7 @@ extension/
 - 会话列表**按 id 合并累积**（fetch_page 是分页接口，跨页不丢失）。
 - 提供 **FETCH_PROXY**：service worker 无法携带页面的 Bearer Token，
   由 content script 在页面上下文代为发起 API 请求（附带捕获的 Token + `credentials: 'include'`）。
+  响应非 JSON 且（Token 缺失或页面特征命中）时判定为**未登录**，返回明确的登录提示而非晦涩错误。
 - 捕获/上报类消息发送失败时静默处理（扩展重载、通道关闭等场景）。
 
 #### 4.2.3 Page Watcher（`page-watcher.ts`）
@@ -248,9 +261,15 @@ extension/
 | 模式 | 说明 |
 |------|------|
 | 当前会话导出 | FETCH_PROXY 拉取完整历史 → 从会话列表补全元数据 → 生成 JSON |
-| 批量全量导出 | FETCH_PROXY 游标翻页拉取全部会话 → 逐个拉取历史 → 合并为单个 JSON |
+| 会话列表加载（LOAD_SESSIONS） | keyset 翻页拉取全部会话摘要，SW 内存缓存（60s TTL），LIST_PROGRESS 广播已加载数 |
+| 批量导出选中（EXPORT_SELECTED） | 按勾选逐个拉取历史（缓存缺失时自动重拉列表）→ 合并为单个 JSON，EXPORT_PROGRESS 携带 N/总数+标题 |
+| 批量删除（DELETE_SESSIONS） | 学习式重放（见 §4.2.6），逐个执行 + 限速 + 进度广播 |
 
 - **限速策略**：每 5 个请求暂停 800ms，翻页间隔 300ms，防止触发风控。
+- **keyset 翻页**：v0 响应无 `next_cursor`，复刻页面自身的 `lte_cursor.updated_at` 游标方式；
+  三重终止保护（空页 / 本页无新会话 / 末条缺 `updated_at`）防死循环，上限 200 页。
+- **导出状态权威源**：SW 维护 `exportInProgress/Progress/Current`，`GET_STATUS` 响应中合并
+  （修复 popup 轮询拿 content 的空闲态覆盖本地进度的缺陷）。
 - 目标标签页通过 `chrome.tabs.query({ active: true, currentWindow: true })` 实时确定，
   不依赖内存态 `currentTabId`（规避 service worker 休眠丢状态）。
 - 下载使用 `chrome.downloads`（manifest 已声明 `downloads` 权限），`saveAs: true`。
@@ -258,10 +277,28 @@ extension/
 
 #### 4.2.5 Popup UI（`popup/App.tsx`，plain 实现）
 
-- `signal` 管理状态（连接状态 / 捕获统计 / 导出进度 / 提示消息），每 2 秒轮询 `GET_STATUS`。
+- **会话管理器**：打开自动加载全部会话列表（SW keyset 翻页 + 缓存），列表展示
+  行号 / 标题 / 本地时间日期，支持全选 / 单选；「导出当前」「导出选中」「删除选中」三个操作。
+- `signal` 管理状态（连接状态 / 列表 / 勾选 / 导出与删除进度 / 提示消息），每 2 秒轮询 `GET_STATUS`。
 - 轮询定时器通过 `ref` 逃逸口挂载，返回清理函数，popup 关闭时停止。
-- 内置诊断：API 捕获诊断（最近 `/api/` 请求 URL）与运行日志面板（拉取 / 下载 / 拷贝 / 清空，见 §4.6）。
+- **删除确认弹窗**：自定义模态（风格与 popup 统一），红色警示「不可恢复」，
+  单个与批量删除均需二次确认。
+- 内置诊断：API 捕获诊断与运行日志面板统一为可折叠卡片（SVG 雪佛龙箭头）。
+- 版本可见性：标题旁显示版本号，日志文本头部携带 `版本 · 导出时间 · 条数`。
 - 未连接时显示引导提示并禁用导出按钮。
+
+#### 4.2.6 学习式批量删除（`deleteSessions` + 模板机制）
+
+删除端点无法猜测且不可逆，采用「让用户的一次真实操作当模板」的设计：
+
+1. **捕获**：用户在 DeepSeek 页面手动删除任意一个会话，fetch hook 识别 `kind === 'delete'`，
+   content script 立即上报 `DELETE_REQUEST_CAPTURED`（完整 url / method / body）。
+2. **学习**：SW 保存模板到内存 + `chrome.storage.local`（SW 休眠 / 重启不丢失），
+   `GET_STATUS` 返回 `deleteTemplateReady`，popup 据此启用「删除选中」。
+3. **重放**：`buildDeleteRequest` 深度遍历模板 body（`replaceUuids`），凡命中 UUID 正则的
+   字符串替换为目标会话 ID（UUID 数组整体替换），无需假设 body 字段结构；
+   经 FETCH_PROXY 重放（method/url/body 形态与真实请求一致，避免 405），逐个执行、限速、
+   单个失败不中断。
 
 ### 4.3 导出 JSON Schema
 
@@ -321,7 +358,9 @@ interface Message {
   `chrome.storage.local`（上限 1000 条），SW 冷启动时恢复，日志不因 SW 休眠丢失。
 - 消息契约：`LOG_ENTRY`（content → SW 单条上报）、`GET_LOGS`（popup 拉取汇总）、
   `CLEAR_LOGS`（清空）。
-- popup「运行日志」面板：刷新 / 下载（.log 文件）/ 拷贝 / 清空，用户可直接把日志发给维护者。
+- popup「运行日志」面板：刷新 / 下载（.log 文件）/ 拷贝 / 清空，用户可直接把日志发给维护者；
+  日志文本头部携带 `扩展版本 · 导出时间 · 条数`（SW 启动与安装/更新日志也记录版本号，
+  便于确认用户实际安装的版本）。
 - 打点位置：content（init、hook 确认、各类捕获、代理请求、路由变化）、
   SW（消息路由、导出各阶段、分页明细、失败明细）。
 
@@ -420,12 +459,17 @@ viewer/
 
 | type | 方向 | 说明 |
 |------|------|------|
-| `GET_STATUS` | popup → SW → content | 连接状态 / 捕获统计 |
+| `GET_STATUS` | popup → SW → content | 连接状态 / 捕获统计 / 导出进度（SW 权威源合并）/ deleteTemplateReady / sessionCacheCount |
 | `EXPORT_CURRENT` | popup → SW → content | 导出当前会话 |
-| `EXPORT_ALL` | popup → SW → content | 批量导出（SW 内游标分页编排） |
-| `EXPORT_PROGRESS` | SW → popup | 批量导出进度（0-100） |
+| `EXPORT_ALL` | popup → SW → content | 取导出请求模板（供 SW 编排复用） |
+| `LOAD_SESSIONS` | popup → SW | 加载全部会话列表（keyset 翻页 + 缓存） |
+| `EXPORT_SELECTED` | popup → SW | 批量导出勾选的会话 |
+| `DELETE_SESSIONS` | popup → SW | 批量删除勾选的会话（学习式重放） |
+| `DELETE_REQUEST_CAPTURED` | content → SW | 上报捕获的删除请求（学习删除接口模板） |
+| `EXPORT_PROGRESS` | SW → popup | 批量导出/删除进度（0-100 + N/总数 + 标题） |
+| `LIST_PROGRESS` | SW → popup | 会话列表加载进度（已加载数） |
 | `PAGE_CHANGED` | content → SW | 路由变化通知 |
-| `SESSION_LIST` / `HISTORY_MESSAGES` / `SSE_COMPLETE` / `AUTH_TOKEN` | content → SW | hook 捕获上报 |
+| `SESSION_LIST` / `HISTORY_MESSAGES` / `SSE_COMPLETE` / `AUTH_TOKEN` / `API_URL` / `API_REQUEST` | content → SW | hook 捕获上报 |
 | `FETCH_PROXY` | SW → content | 页面上下文代理 API 请求（携带 url + body，返回 JSON 或 error） |
 
 ### 6.2 Fetch Hook ↔ Content Script
@@ -444,11 +488,12 @@ viewer/
 | 场景 | 处理方式 |
 |------|----------|
 | content script 未注入（页面未刷新） | popup 显示"未连接时请刷新 DeepSeek 页面后重试" |
+| 未登录 / 登录过期 | 代理请求识别 401/403 或 HTML 响应 + Token 缺失，提示"请先登录 chat.deepseek.com" |
 | 无活跃 DeepSeek 标签页 | 导出请求返回明确错误信息 |
-| API 请求失败（FETCH_PROXY 报错） | 单会话导出失败展示错误；批量导出跳过该会话继续 |
+| API 请求失败（FETCH_PROXY 报错） | 单会话导出失败展示错误；批量导出跳过该会话继续；批量删除单个失败不中断 |
 | API 结构变更（如 next_cursor 字段变更） | 解析失败给出明确错误，不静默吞掉 |
 | 会话数据为空 | 跳过该会话 |
-| 防御性上限 | 会话列表翻页最多 100 页，避免异常响应死循环 |
+| 防御性上限 | 会话列表翻页最多 200 页 + 三重终止（空页/无新会话/缺游标字段），避免异常响应死循环 |
 
 ### 7.2 查看器端
 
@@ -463,10 +508,12 @@ viewer/
 
 ## 8. 安全考量
 
-- **零外联**：所有请求由用户浏览器发起，仅调用只读 API，不向第三方发送数据。
+- **零外联**：所有请求由用户浏览器发起，仅调用 DeepSeek 官方页面自身使用的 API，不向第三方发送数据。
 - **Token 安全**：Bearer Token 仅存于内存（content script 变量），不持久化到 `chrome.storage`。
-- **只读操作**：仅调用只读 API。
+- **删除操作**：唯一的写操作；端点不硬编码，由用户手动删除一次"学习"而来；
+  仅用户在 popup 勾选并经过自定义弹窗二次确认后才执行，逐个重放页面真实请求形态。
 - **查看器纯前端**：JSON 文件通过 FileReader 本地读取，不上传任何服务器。
+- **导出数据隐私**：`.tmp/`（调试导出文件）不入 git，已在各级 `.gitignore` 声明。
 - **Markdown 渲染**：`markdown-it` 关闭原始 HTML；外链强制 `noopener noreferrer`。
 
 ---
@@ -475,8 +522,8 @@ viewer/
 
 | 风险 | 影响 | 缓解措施 |
 |------|------|----------|
-| DeepSeek API 结构变更 | 扩展无法正确解析数据 | 数据校验 + 明确错误提示（见 §7.1） |
-| DeepSeek 反爬/风控 | 批量导出被限制 | 限速策略（800ms/5 请求 + 翻页间隔） |
+| DeepSeek API 结构变更 | 扩展无法正确解析数据 | 数据校验 + 明确错误提示（见 §7.1）；正文/列表均多级容错提取 |
+| DeepSeek 反爬/风控 | 批量导出/删除被限制 | 限速策略（800ms/5 请求 + 翻页间隔），删除逐个重放真实请求形态 |
 | Manifest V3 SW 休眠 | 内存态丢失 | 导出目标 tab 实时 query；导出流程单次完成不依赖跨唤醒状态 |
 | 大文件渲染性能 | 浏览器卡顿 | 会话列表/消息为细粒度更新；后续可引入虚拟滚动 |
 | SSE 流中断 | 助手回复不完整 | 流未以 [DONE] 结束也派发已拼装内容 |
@@ -491,3 +538,5 @@ viewer/
 - [ ] 导出 Markdown / HTML 格式（当前仅 JSON）
 - [ ] 导出进度断点续传（SW 被唤醒后恢复）
 - [ ] `plaindev check` 接入 CI（两端统一 lint 门禁）
+- [x] 会话管理器（列表 / 全选 / 批量导出 / 批量删除）— v1.0.12 已实现
+- [x] 全量导出突破 100 条限制（keyset 翻页）— v1.0.12 已实现
