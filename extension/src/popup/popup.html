@@ -335,6 +335,28 @@
       word-break: break-all;
       color: #334155;
     }
+
+      /* ---------- 滚动条（隐藏三角箭头，圆角半透明滑块） ---------- */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(0, 0, 0, 0.14);
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgba(0, 0, 0, 0.24);
+      }
+      ::-webkit-scrollbar-button {
+        display: none;
+      }
+      ::-webkit-scrollbar-corner {
+        background: transparent;
+      }
   </style>
 </head>
 <body>
