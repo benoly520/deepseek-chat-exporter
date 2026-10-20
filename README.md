@@ -4,7 +4,7 @@ DeepSeek 网页版（chat.deepseek.com）聊天记录管理与离线查看工具
 
 | 子项目 | 目录 | 技术栈 | 说明 | 下载 |
 |--------|------|--------|------|------|
-| Chrome 扩展（管理端） | `extension/` | Manifest V3 + TypeScript + plain + esbuild | 会话管理器：浏览 / 批量导出 / 批量删除聊天记录，导出为结构化 JSON | **[⬇ 最新构建 zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)** |
+| Chrome 扩展（管理端） | `extension/` | Manifest V3 + TypeScript + [plain-framework](https://benoly520.github.io/plain-framework/) + esbuild | 会话管理器：浏览 / 批量导出 / 批量删除聊天记录，导出为结构化 JSON | **[⬇ 最新构建 zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)** |
 | 查看器（展示端） | `viewer/` | [plain-framework](https://benoly520.github.io/plain-framework/) + markdown-it + highlight.js | 离线查看器：导入导出的 JSON，以气泡对话形式离线浏览 | — |
 
 > 软件设计文档（SDD）见 [doc/deepseek-chat-exporter_sdd.md](doc/deepseek-chat-exporter_sdd.md)，已随当前实现修订（v1.2.0）。
