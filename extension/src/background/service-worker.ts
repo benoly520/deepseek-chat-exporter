@@ -1,6 +1,7 @@
 /**
  * Background Service Worker。
- * 负责导出编排（单会话 / 批量 + 游标分页 + 限速）与消息路由。
+ * 负责导出编排（单会话 / 批量 + 游标分页 + 限速）、消息路由与日志汇总。
+ * 运行日志持久化到 chrome.storage.local，popup 可拉取 / 下载 / 清空。
  */
 
 import type {
@@ -15,6 +16,16 @@ import type {
 } from '../types';
 import { buildExportJSON, buildConversation } from '../utils/json-builder';
 import { triggerDownload, generateFilename } from '../utils/downloader';
+import { createLocalLogger } from '../utils/logger';
+import { LogStore } from '../utils/log-store';
+import type { LogEntry } from '../utils/logger';
+
+// 日志
+const logger = createLocalLogger('sw');
+// 日志仓库：汇总 content script 转发的日志并持久化
+const logStore = new LogStore();
+// 尽早开始恢复历史日志
+logStore.init();
 
 // 状态
 let exportInProgress = false;
@@ -29,7 +40,30 @@ const SESSION_PAGE_SIZE = 50;
  * 处理来自 content script 与 popup 的消息。
  */
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
-  if (message.type === 'GET_STATUS') {
+  // 记录消息来源类型（LOG_ENTRY 除外，避免自激循环）
+  if (message.type !== 'LOG_ENTRY') {
+    logger.debug('Message received', message.type);
+  }
+
+  if (message.type === 'LOG_ENTRY') {
+    logStore.add(message.payload as LogEntry);
+    sendResponse({ success: true });
+  } else if (message.type === 'GET_LOGS') {
+    logStore
+      .getAll()
+      .then((entries) => {
+        // 合并 popup 本地日志（如日志器自带 entries）不在此处理，仅返回汇总日志
+        sendResponse({ entries });
+      })
+      .catch((error) => sendResponse({ error: String(error) }));
+    return true;
+  } else if (message.type === 'CLEAR_LOGS') {
+    logStore
+      .clear()
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ error: String(error) }));
+    return true;
+  } else if (message.type === 'GET_STATUS') {
     getStatus(sendResponse);
     return true; // 异步响应
   } else if (message.type === 'EXPORT_CURRENT') {
@@ -46,7 +80,6 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
     message.type === 'AUTH_TOKEN'
   ) {
     // 捕获类消息仅记录，数据以 content script 为准
-    console.log('[DeepSeek Exporter] Data captured:', message.type);
     sendResponse({ success: true });
   }
 
@@ -62,7 +95,7 @@ async function getActiveDeepSeekTabId(): Promise<number | null> {
     const tab = tabs.find((t) => t.url?.includes('chat.deepseek.com'));
     return tab?.id ?? null;
   } catch (error) {
-    console.error('[DeepSeek Exporter] Failed to query tabs:', error);
+    logger.error('Failed to query tabs', String(error));
     return null;
   }
 }
@@ -82,6 +115,7 @@ async function getStatus(sendResponse: (response: StatusPayload) => void) {
 
   const tabId = await getActiveDeepSeekTabId();
   if (!tabId) {
+    logger.debug('GET_STATUS: no active DeepSeek tab');
     sendResponse(idleStatus);
     return;
   }
@@ -91,6 +125,7 @@ async function getStatus(sendResponse: (response: StatusPayload) => void) {
     sendResponse(response ?? idleStatus);
   } catch (error) {
     // content script 未注入（页面尚未刷新过）等场景
+    logger.warn('GET_STATUS: content script unreachable', String(error));
     sendResponse(idleStatus);
   }
 }
@@ -115,6 +150,7 @@ async function proxyFetch<T>(tabId: number, url: string, body: unknown): Promise
   });
 
   if (result?.error) {
+    logger.error('Proxy fetch returned error', { url, error: result.error });
     throw new Error(result.error);
   }
   return result.data as T;
@@ -130,13 +166,21 @@ async function fetchAllSessions(tabId: number): Promise<SessionSummary[]> {
   let page = 0;
   const MAX_PAGES = 100; // 防御性上限，避免异常响应导致死循环
 
+  logger.info('fetchAllSessions start');
+
   while (page < MAX_PAGES) {
-    const data = await proxyFetch<SessionListResponse>(tabId, `${API_BASE}/api/chat_session/fetch_page`, {
-      cursor,
-      limit: SESSION_PAGE_SIZE,
-      order_by: 'updated_at',
-      direction: 'DESC',
-    });
+    let data: SessionListResponse;
+    try {
+      data = await proxyFetch<SessionListResponse>(tabId, `${API_BASE}/api/chat_session/fetch_page`, {
+        cursor,
+        limit: SESSION_PAGE_SIZE,
+        order_by: 'updated_at',
+        direction: 'DESC',
+      });
+    } catch (error) {
+      logger.error('fetchAllSessions page failed', { page, cursor, error: String(error) });
+      throw error;
+    }
 
     const pageSessions = data?.data?.sessions || [];
     for (const s of pageSessions) {
@@ -147,6 +191,13 @@ async function fetchAllSessions(tabId: number): Promise<SessionSummary[]> {
     }
 
     const nextCursor = data?.data?.next_cursor || '';
+    logger.info('fetchAllSessions page done', {
+      page,
+      got: pageSessions.length,
+      total: sessions.length,
+      nextCursor: nextCursor || '(empty)',
+    });
+
     if (!nextCursor || pageSessions.length === 0) {
       break;
     }
@@ -157,22 +208,28 @@ async function fetchAllSessions(tabId: number): Promise<SessionSummary[]> {
     await sleep(300);
   }
 
+  logger.info('fetchAllSessions finished', { total: sessions.length, pages: page + 1 });
   return sessions;
 }
 
 /**
  * 拉取指定会话的完整历史消息。
  */
-async function fetchHistoryMessages(tabId: number, sessionId: string): Promise<RawMessage[] | null> {
+async function fetchHistoryMessages(
+  tabId: number,
+  sessionId: string
+): Promise<RawMessage[] | null> {
   try {
     const data = await proxyFetch<HistoryMessagesResponse>(
       tabId,
       `${API_BASE}/api/chat/history_messages`,
       { session_id: sessionId }
     );
-    return data?.data?.messages || null;
+    const messages = data?.data?.messages || null;
+    logger.debug('fetchHistoryMessages done', { sessionId, count: messages?.length ?? 0 });
+    return messages;
   } catch (error) {
-    console.error('[DeepSeek Exporter] Failed to fetch history messages:', error);
+    logger.error('fetchHistoryMessages failed', { sessionId, error: String(error) });
     return null;
   }
 }
@@ -183,6 +240,7 @@ async function fetchHistoryMessages(tabId: number, sessionId: string): Promise<R
 async function exportCurrentConversation(sendResponse: (response: any) => void) {
   const tabId = await getActiveDeepSeekTabId();
   if (!tabId) {
+    logger.warn('exportCurrent: no DeepSeek tab');
     sendResponse({ error: '未找到 DeepSeek 标签页，请先打开 chat.deepseek.com' });
     return;
   }
@@ -190,6 +248,7 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
   try {
     exportInProgress = true;
     exportProgress = 0;
+    logger.info('exportCurrent start', { tabId });
 
     // 获取当前会话 ID 与已捕获的消息
     const sessionData = await sendToTab<{
@@ -207,14 +266,23 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
 
     // 优先通过代理拉取完整历史，失败时退回已捕获消息
     const messages = (await fetchHistoryMessages(tabId, sessionId)) || sessionData.messages || [];
+    logger.info('exportCurrent history ready', {
+      sessionId,
+      source: 'proxy',
+      count: messages.length,
+    });
 
     // 拉取会话元数据（标题等），失败时使用占位信息
     let sessionInfo: SessionSummary | null = null;
     try {
       const list = await fetchAllSessions(tabId);
       sessionInfo = list.find((s) => s.id === sessionId) || null;
+      logger.info('exportCurrent session info', {
+        found: Boolean(sessionInfo),
+        title: sessionInfo?.title || '',
+      });
     } catch (error) {
-      console.error('[DeepSeek Exporter] Failed to fetch session info:', error);
+      logger.error('exportCurrent fetch session info failed', String(error));
     }
 
     const conversation = buildConversation(
@@ -226,6 +294,7 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
 
     const filename = generateFilename(`deepseek-session-${sessionId.slice(0, 8)}`);
     await triggerDownload(exportData, filename);
+    logger.info('exportCurrent download triggered', { filename });
 
     exportInProgress = false;
     exportProgress = 100;
@@ -233,6 +302,7 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
   } catch (error) {
     exportInProgress = false;
     exportProgress = 0;
+    logger.error('exportCurrent failed', String(error));
     sendResponse({ error: String(error) });
   }
 }
@@ -243,6 +313,7 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
 async function exportAllConversations(sendResponse: (response: any) => void) {
   const tabId = await getActiveDeepSeekTabId();
   if (!tabId) {
+    logger.warn('exportAll: no DeepSeek tab');
     sendResponse({ error: '未找到 DeepSeek 标签页，请先打开 chat.deepseek.com' });
     return;
   }
@@ -250,17 +321,20 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
   try {
     exportInProgress = true;
     exportProgress = 0;
+    logger.info('exportAll start', { tabId });
 
     // 分页拉取全部会话
     const sessions = await fetchAllSessions(tabId);
 
     if (sessions.length === 0) {
+      logger.warn('exportAll: no sessions found');
       sendResponse({ error: '未找到会话，请先在 DeepSeek 页面浏览或刷新后重试' });
       return;
     }
 
     const conversations: Conversation[] = [];
     const totalSessions = sessions.length;
+    const failed: string[] = [];
 
     // 逐个拉取历史消息并限速
     for (let i = 0; i < sessions.length; i++) {
@@ -287,6 +361,14 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
         if (historyData) {
           const conversation = buildConversation(session, historyData);
           conversations.push(conversation);
+          logger.debug('exportAll session ok', {
+            i,
+            id: session.id,
+            messages: historyData.length,
+          });
+        } else {
+          failed.push(session.id);
+          logger.warn('exportAll session empty history', { i, id: session.id });
         }
 
         // 每 5 个请求暂停 800ms，防止触发风控
@@ -294,7 +376,8 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
           await sleep(800);
         }
       } catch (error) {
-        console.error(`[DeepSeek Exporter] Failed to export session ${session.id}:`, error);
+        failed.push(session.id);
+        logger.error('exportAll session failed', { i, id: session.id, error: String(error) });
         // 单个会话失败不中断整体导出
       }
     }
@@ -303,6 +386,11 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
 
     const filename = generateFilename('deepseek-all-conversations');
     await triggerDownload(exportData, filename);
+    logger.info('exportAll download triggered', {
+      filename,
+      conversations: conversations.length,
+      failed: failed.length,
+    });
 
     exportInProgress = false;
     exportProgress = 100;
@@ -310,6 +398,7 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
   } catch (error) {
     exportInProgress = false;
     exportProgress = 0;
+    logger.error('exportAll failed', String(error));
     sendResponse({ error: String(error) });
   }
 }
@@ -324,6 +413,6 @@ function sleep(ms: number): Promise<void> {
 /**
  * 扩展安装 / 更新时提示。
  */
-chrome.runtime.onInstalled.addListener(() => {
-  console.log('[DeepSeek Exporter] Extension installed');
+chrome.runtime.onInstalled.addListener((details) => {
+  logger.info('Extension installed/updated', details.reason);
 });

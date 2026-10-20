@@ -1,9 +1,11 @@
 /**
  * Content Script 入口。
  * 负责：注入 fetch hook、监听捕获数据、按需代理 API 请求、响应 background 消息。
+ * 所有运行日志通过 createLocalLogger 记录并转发给 service worker 汇总。
  */
 
 import { startPageWatcher } from './page-watcher';
+import { createLocalLogger } from '../utils/logger';
 import type {
   ExtensionMessage,
   StatusPayload,
@@ -13,6 +15,9 @@ import type {
   FetchProxyPayload,
 } from '../types';
 
+// 日志器：本地记录 + 转发 SW 汇总
+const logger = createLocalLogger('content', true);
+
 // 状态
 let currentSessionId: string | null = null;
 // 按 id 合并累积的会话列表（fetch_page 是分页接口，需跨页累积）
@@ -21,13 +26,18 @@ let capturedMessages: HistoryMessagesResponse['data']['messages'] = [];
 let hookInstalled = false;
 // 从页面请求中捕获的 Bearer Token，代理请求时附带
 let authToken = '';
+// 诊断用：最近捕获的 /api/ 请求 URL（最新在前，去重，最多 20 条）
+let recentApiUrls: string[] = [];
 
 /**
  * 初始化 content script。
  * 在 document_start 立即执行，确保 fetch hook 先于页面的首批 API 请求安装。
  */
 function init() {
-  console.log('[DeepSeek Exporter] Content script initializing...');
+  logger.info('Content script initializing', {
+    url: location.href,
+    readyState: document.readyState,
+  });
 
   // 注入 fetch hook 到 MAIN world
   injectFetchHook();
@@ -42,14 +52,14 @@ function init() {
   window.addEventListener('__ds_hook_control__', ((event: CustomEvent) => {
     if (event.detail.status === 'installed') {
       hookInstalled = true;
-      console.log('[DeepSeek Exporter] Fetch hook confirmed installed');
+      logger.info('Fetch hook confirmed installed');
     }
   }) as EventListener);
 
   // 启动路由监听
   startPageWatcher((sessionId) => {
     currentSessionId = sessionId;
-    console.log('[DeepSeek Exporter] Page changed, session ID:', sessionId);
+    logger.info('Page changed, session ID', sessionId);
 
     notifyBackground({
       type: 'PAGE_CHANGED',
@@ -63,7 +73,7 @@ function init() {
     return true; // 保持消息通道以支持异步响应
   });
 
-  console.log('[DeepSeek Exporter] Content script initialized');
+  logger.info('Content script initialized');
 }
 
 /**
@@ -76,7 +86,13 @@ function injectFetchHook() {
   script.src = chrome.runtime.getURL('content/fetch-hook.js');
   // esbuild 产物为 IIFE，用经典脚本注入即可
   (document.head || document.documentElement).appendChild(script);
-  script.onload = () => script.remove();
+  script.onload = () => {
+    script.remove();
+    logger.debug('Fetch hook script loaded and removed from DOM');
+  };
+  script.onerror = () => {
+    logger.error('Fetch hook script failed to load', script.src);
+  };
 }
 
 /**
@@ -98,14 +114,25 @@ function notifyBackground(message: ExtensionMessage) {
  * 处理 fetch hook 捕获的数据。
  */
 function handleCapturedData(type: string, data: unknown) {
-  console.log('[DeepSeek Exporter] Captured data:', type);
+  logger.debug('Captured data', type);
 
   if (type === 'auth_token') {
     authToken = String(data);
+    logger.info('Auth token captured');
+  } else if (type === 'api_url') {
+    // 记录最近的 /api/ 请求 URL，供 popup 诊断展示
+    const url = String(data);
+    recentApiUrls = [url, ...recentApiUrls.filter((u) => u !== url)].slice(0, 20);
   } else if (type === 'session_list') {
     const sessionData = data as SessionListResponse;
+    const count = sessionData.data.sessions?.length || 0;
     // 按 id 合并，跨页累积会话列表
     capturedSessions = mergeSessions(capturedSessions, sessionData.data.sessions);
+    logger.info('Session list captured', {
+      page: count,
+      total: capturedSessions.length,
+      nextCursor: sessionData.data.next_cursor || '(empty)',
+    });
 
     notifyBackground({
       type: 'SESSION_LIST',
@@ -114,12 +141,20 @@ function handleCapturedData(type: string, data: unknown) {
   } else if (type === 'history_messages') {
     const messageData = data as HistoryMessagesResponse;
     capturedMessages = messageData.data.messages;
+    logger.info('History messages captured', { count: capturedMessages.length });
 
     notifyBackground({
       type: 'HISTORY_MESSAGES',
       payload: messageData,
     });
   } else if (type === 'sse_complete') {
+    const sse = data as { content?: string; thinking?: string; model?: string };
+    logger.info('SSE stream completed', {
+      contentLen: sse.content?.length || 0,
+      thinkingLen: sse.thinking?.length || 0,
+      model: sse.model || '',
+    });
+
     notifyBackground({
       type: 'SSE_COMPLETE',
       payload: data,
@@ -152,6 +187,12 @@ async function proxyFetch(payload: FetchProxyPayload): Promise<unknown> {
     headers['Authorization'] = authToken;
   }
 
+  logger.info('Proxy fetch start', {
+    url: payload.url,
+    body: payload.body,
+    withToken: Boolean(authToken),
+  });
+
   const response = await fetch(payload.url, {
     method: 'POST',
     headers,
@@ -160,10 +201,17 @@ async function proxyFetch(payload: FetchProxyPayload): Promise<unknown> {
   });
 
   if (!response.ok) {
+    logger.error('Proxy fetch failed', {
+      url: payload.url,
+      status: response.status,
+      statusText: response.statusText,
+    });
     throw new Error(`API ${response.status}: ${response.statusText}`);
   }
 
-  return response.json();
+  const json = await response.json();
+  logger.debug('Proxy fetch ok', payload.url);
+  return json;
 }
 
 /**
@@ -178,20 +226,27 @@ function handleMessage(message: ExtensionMessage, sendResponse: (response?: any)
       capturedMessages: capturedMessages.length,
       exporting: false,
       exportProgress: 0,
+      recentApiUrls,
     };
     sendResponse(status);
   } else if (message.type === 'EXPORT_CURRENT') {
     // 返回当前会话与已捕获消息（完整历史由 background 通过代理请求补全）
     if (!currentSessionId) {
+      logger.warn('EXPORT_CURRENT requested but no session id');
       sendResponse({ error: '未找到当前会话，请先打开一个对话' });
       return;
     }
 
+    logger.info('EXPORT_CURRENT requested', {
+      sessionId: currentSessionId,
+      capturedCount: capturedMessages.length,
+    });
     sendResponse({
       sessionId: currentSessionId,
       messages: capturedMessages,
     });
   } else if (message.type === 'EXPORT_ALL') {
+    logger.info('EXPORT_ALL requested', { capturedSessions: capturedSessions.length });
     sendResponse({
       sessions: capturedSessions,
     });

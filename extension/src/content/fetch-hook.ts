@@ -1,15 +1,46 @@
 /**
  * Fetch Hook —— 注入页面 MAIN world，拦截 DeepSeek API 调用。
  * 运行在页面上下文（而非扩展上下文）。
+ *
+ * 同时覆盖 fetch 与 XMLHttpRequest（部分前端栈走 XHR），
+ * URL 匹配采用"路径后缀"方式，兼容 /api/v0/... 等版本前缀。
  */
 
 (function() {
   'use strict';
 
-  // 保存原始 fetch
+  // 保存原始实现
   const originalFetch = window.fetch;
+  const XHR = XMLHttpRequest.prototype;
+  const originalXhrOpen = XHR.open;
+  const originalXhrSend = XHR.send;
+  const originalXhrSetHeader = XHR.setRequestHeader;
+
   // 记录最近捕获的 Authorization 头（DeepSeek 网页版使用 Bearer Token 认证）
   let lastAuthToken = '';
+
+  /**
+   * 判断是否为目标 API（路径后缀匹配，兼容 /api/v0/... 等版本前缀）。
+   */
+  function isSessionListApi(url: string): boolean {
+    return url.includes('chat_session/fetch_page');
+  }
+
+  function isHistoryApi(url: string): boolean {
+    return url.includes('history_messages');
+  }
+
+  /**
+   * 上报 API URL（诊断用：全部 /api/ 请求都会记录）。
+   */
+  function noteApiUrl(url: string) {
+    if (!url.includes('/api/')) return;
+    dispatchDataEvent('api_url', url);
+  }
+
+  // ---------------------------------------------------------------------------
+  // fetch 拦截
+  // ---------------------------------------------------------------------------
 
   /**
    * 拦截 fetch 调用，捕获目标 API 响应。
@@ -20,17 +51,19 @@
       ? input
       : input instanceof Request ? input.url : String(input);
 
+    noteApiUrl(url);
+
     // 提取 Authorization 头（Request 对象或 init.headers 均可能携带）
-    const authHeader = readAuthHeader(input, init);
+    const authHeader = readHeader(input, init, 'authorization');
     if (authHeader && authHeader !== lastAuthToken) {
       lastAuthToken = authHeader;
       dispatchDataEvent('auth_token', authHeader);
     }
 
-    const acceptHeader = readAcceptHeader(input, init);
+    const acceptHeader = readHeader(input, init, 'accept');
     const shouldIntercept =
-      url.includes('/api/chat_session/fetch_page') ||
-      url.includes('/api/chat/history_messages') ||
+      isSessionListApi(url) ||
+      isHistoryApi(url) ||
       acceptHeader.includes('text/event-stream');
 
     if (!shouldIntercept) {
@@ -43,9 +76,9 @@
       // 克隆响应以便在不消耗原始响应体的前提下读取
       const clonedResponse = response.clone();
 
-      if (url.includes('/api/chat_session/fetch_page')) {
+      if (isSessionListApi(url)) {
         handleSessionListResponse(clonedResponse);
-      } else if (url.includes('/api/chat/history_messages')) {
+      } else if (isHistoryApi(url)) {
         handleHistoryMessagesResponse(clonedResponse);
       } else if (acceptHeader.includes('text/event-stream')) {
         handleSSEResponse(clonedResponse);
@@ -60,9 +93,9 @@
   };
 
   /**
-   * 从请求参数中读取 Accept 头（兼容 string / Headers / Request / 普通对象）。
+   * 从请求参数中读取指定请求头（兼容 string / Headers / Request / 普通对象）。
    */
-  function readAcceptHeader(input: unknown, init?: RequestInit): string {
+  function readHeader(input: unknown, init: RequestInit | undefined, name: string): string {
     let headers: Headers | undefined;
     if (input instanceof Request) {
       headers = input.headers;
@@ -70,21 +103,7 @@
     if (init?.headers) {
       headers = normalizeHeaders(init.headers);
     }
-    return headers?.get('Accept') || headers?.get('accept') || '';
-  }
-
-  /**
-   * 从请求参数中读取 Authorization 头。
-   */
-  function readAuthHeader(input: unknown, init?: RequestInit): string {
-    let headers: Headers | undefined;
-    if (input instanceof Request) {
-      headers = input.headers;
-    }
-    if (init?.headers) {
-      headers = normalizeHeaders(init.headers);
-    }
-    return headers?.get('Authorization') || headers?.get('authorization') || '';
+    return headers?.get(name) || '';
   }
 
   /**
@@ -96,6 +115,55 @@
     if (typeof value === 'object') return new Headers(value as Record<string, string>);
     return undefined;
   }
+
+  // ---------------------------------------------------------------------------
+  // XMLHttpRequest 拦截（兜底：部分前端栈不走 fetch）
+  // ---------------------------------------------------------------------------
+
+  XHR.open = function(this: XMLHttpRequest & { __dsUrl?: string }, ...args: any[]) {
+    const url = args[1];
+    this.__dsUrl = typeof url === 'string' ? url : String(url);
+    return (originalXhrOpen as any).apply(this, args);
+  };
+
+  XHR.setRequestHeader = function(this: XMLHttpRequest, name: string, value: string) {
+    if (String(name).toLowerCase() === 'authorization' && value && value !== lastAuthToken) {
+      lastAuthToken = value;
+      dispatchDataEvent('auth_token', value);
+    }
+    return (originalXhrSetHeader as any).call(this, name, value);
+  };
+
+  XHR.send = function(this: XMLHttpRequest & { __dsUrl?: string }, ...sendArgs: any[]) {
+    const url: string = this.__dsUrl || '';
+    noteApiUrl(url);
+
+    if (isSessionListApi(url) || isHistoryApi(url)) {
+      this.addEventListener('load', () => {
+        try {
+          // 优先用 responseURL（重定向后更准确）
+          const finalUrl = this.responseURL || url;
+          const contentType = this.getResponseHeader('content-type') || '';
+          if (!contentType.includes('application/json')) return;
+
+          const data = JSON.parse(this.responseText);
+          if (isSessionListApi(finalUrl)) {
+            dispatchDataEvent('session_list', data);
+          } else if (isHistoryApi(finalUrl)) {
+            dispatchDataEvent('history_messages', data);
+          }
+        } catch (error) {
+          console.error('[DeepSeek Exporter] Failed to parse XHR response:', error);
+        }
+      });
+    }
+
+    return (originalXhrSend as any).apply(this, sendArgs);
+  };
+
+  // ---------------------------------------------------------------------------
+  // 响应处理
+  // ---------------------------------------------------------------------------
 
   /**
    * 处理会话列表 API 响应。
@@ -222,5 +290,5 @@
     detail: { status: 'installed' }
   }));
 
-  console.log('[DeepSeek Exporter] Fetch hook installed');
+  console.log('[DeepSeek Exporter] Fetch hook installed (fetch + XHR)');
 })();

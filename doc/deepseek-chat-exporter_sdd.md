@@ -11,6 +11,8 @@
 |------|------|------|
 | 1.0.0 | — | 初版 SDD（Chrome 扩展 + Vue 3 SPA 方案） |
 | 1.1.0 | 2026-10-20 | 随迁移重构修订：Popup 与查看器统一改用 plain-framework；修复 popup 白屏 / hook 注入路径 / UUID 正则 / downloads 权限等缺陷；新增 FETCH_PROXY 鉴权代理与游标分页导出 |
+| 1.1.1 | 2026-10-20 | 会话 URL 实际形如 /a/chat/s/{uuid}（含 /s/ 段），修正 page-watcher 正则；API 匹配改为路径后缀式（兼容 /api/v0/... 版本前缀）；新增 XHR 拦截兜底；popup 增加「API 捕获诊断」区块 |
+| 1.1.2 | 2026-10-20 | manifest icons 由 SVG 改为 PNG（Chromium 不支持 SVG 图标，显示为字母占位符）；新增运行日志系统（content/SW 日志汇总持久化，popup 支持拉取 / 下载 / 拷贝 / 清空） |
 
 ## 1. 项目概述
 
@@ -236,8 +238,8 @@ extension/
 
 #### 4.2.3 Page Watcher（`page-watcher.ts`）
 
-- 从 URL 提取会话 ID：`/a/chat/{session_id}`，**session_id 为带连字符的 UUID**
-  （如 `5a298e61-4fd4-455b-9aaf-7c6142d727a0`），正则必须包含连字符。
+- 从 URL 提取会话 ID：`/a/chat/s/{session_id}`（注意存在 `/s/` 段），**session_id 为带
+  连字符的 UUID**（如 `5a298e61-4fd4-455b-9aaf-7c6142d727a0`），正则需兼容 `/s/` 段并包含连字符。
 - 监听 `popstate` + 劫持 `pushState/replaceState` + MutationObserver 兜底
   （观察 `documentElement`，因 `document_start` 时 `body` 尚不存在）。
 
@@ -258,6 +260,7 @@ extension/
 
 - `signal` 管理状态（连接状态 / 捕获统计 / 导出进度 / 提示消息），每 2 秒轮询 `GET_STATUS`。
 - 轮询定时器通过 `ref` 逃逸口挂载，返回清理函数，popup 关闭时停止。
+- 内置诊断：API 捕获诊断（最近 `/api/` 请求 URL）与运行日志面板（拉取 / 下载 / 拷贝 / 清空，见 §4.6）。
 - 未连接时显示引导提示并禁用导出按钮。
 
 ### 4.3 导出 JSON Schema
@@ -306,6 +309,21 @@ interface Message {
 
 - `downloads` 权限是 service worker 触发下载的必要条件（初版缺失导致批量导出失败，已修复）。
 - `run_at: document_start` 保证 hook 先于页面 API 请求安装。
+- **icons 必须使用 PNG**：Chromium 的 manifest icons 不支持 SVG，SVG 会显示为字母占位符。
+
+### 4.5.1 运行日志系统
+
+排查问题的自助手段，避免每次口述复现步骤：
+
+- `utils/logger.ts`：`createLocalLogger(scope, forward)` —— 内存环形缓冲（500 条）+
+  控制台输出 + 可选转发 SW（content script 开启转发）。
+- `utils/log-store.ts`（SW 端）：汇总自身与 content 转发的日志，节流（500ms）持久化到
+  `chrome.storage.local`（上限 1000 条），SW 冷启动时恢复，日志不因 SW 休眠丢失。
+- 消息契约：`LOG_ENTRY`（content → SW 单条上报）、`GET_LOGS`（popup 拉取汇总）、
+  `CLEAR_LOGS`（清空）。
+- popup「运行日志」面板：刷新 / 下载（.log 文件）/ 拷贝 / 清空，用户可直接把日志发给维护者。
+- 打点位置：content（init、hook 确认、各类捕获、代理请求、路由变化）、
+  SW（消息路由、导出各阶段、分页明细、失败明细）。
 
 ### 4.5 构建方式
 

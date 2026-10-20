@@ -101,7 +101,10 @@ export type MessageType =
   | 'EXPORT_CURRENT'
   | 'EXPORT_ALL'
   | 'EXPORT_PROGRESS'
-  | 'FETCH_PROXY';
+  | 'FETCH_PROXY'
+  | 'LOG_ENTRY'
+  | 'GET_LOGS'
+  | 'CLEAR_LOGS';
 
 export interface ExtensionMessage {
   type: MessageType;
@@ -115,6 +118,8 @@ export interface StatusPayload {
   capturedMessages: number;
   exporting: boolean;
   exportProgress: number;
+  /** 诊断用：最近捕获到的 /api/ 请求 URL（最新在前，最多 20 条） */
+  recentApiUrls?: string[];
 }
 
 /** FETCH_PROXY 消息载荷：由 service worker 发起、content script 在页面上下文代为执行 */

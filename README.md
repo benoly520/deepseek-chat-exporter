@@ -7,7 +7,7 @@ DeepSeek 网页版（chat.deepseek.com）聊天记录导出与离线查看工具
 | Chrome 扩展（导出端） | `extension/` | Manifest V3 + TypeScript + plain + esbuild | 拦截 DeepSeek API 响应，将聊天记录导出为结构化 JSON |
 | 查看器（展示端） | `viewer/` | [plain-framework](https://benoly520.github.io/plain-framework/) + markdown-it + highlight.js | 导入导出的 JSON，以气泡对话形式离线浏览 |
 
-> 软件设计文档（SDD）见 [doc/SDD-deepseek-chat-exporter.md](doc/SDD-deepseek-chat-exporter.md)，已随当前实现修订（v1.1.0）。
+> 软件设计文档（SDD）见 [doc/deepseek-chat-exporter_sdd.md](doc/deepseek-chat-exporter_sdd.md)，已随当前实现修订（v1.1.1）。
 
 ## 目录结构
 

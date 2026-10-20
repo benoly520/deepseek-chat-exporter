@@ -1,10 +1,12 @@
 /**
  * Popup 主界面（plain 实现）。
- * 状态：与 background 轮询同步的连接状态 / 导出进度 / 提示消息。
+ * 状态：与 background 轮询同步的连接状态 / 导出进度 / 提示消息 / 运行日志。
  */
 
 import { signal, resolve } from 'plain';
 import type { StatusPayload, ExtensionMessage } from '../types';
+import { formatAll } from '../utils/logger';
+import type { LogEntry } from '../utils/logger';
 
 // --- 状态 ---
 
@@ -22,6 +24,9 @@ const status = signal<StatusPayload>({
 const message = signal('');
 /** 提示消息是否为错误 */
 const isError = signal(false);
+
+/** 汇总日志文本（从 service worker 拉取） */
+const logsText = signal('');
 
 // 进度监听只注册一次
 let progressListenerAdded = false;
@@ -47,6 +52,74 @@ async function fetchStatus() {
 function showMessage(text: string, error: boolean) {
   message.set(text);
   isError.set(error);
+}
+
+/**
+ * 从 service worker 拉取汇总日志。
+ */
+async function loadLogs() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_LOGS' });
+    if (response?.error) {
+      logsText.set(`日志拉取失败: ${response.error}`);
+    } else {
+      const entries = (response?.entries || []) as LogEntry[];
+      logsText.set(entries.length > 0 ? formatAll(entries) : '暂无日志');
+    }
+  } catch (error) {
+    logsText.set(`日志拉取失败: ${String(error)}`);
+  }
+}
+
+/**
+ * 下载日志文件。
+ */
+async function downloadLogs() {
+  try {
+    const text = logsText();
+    if (!text || text === '暂无日志') {
+      await loadLogs();
+    }
+    const blob = new Blob([logsText()], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `deepseek-exporter-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (error) {
+    showMessage(`日志下载失败: ${String(error)}`, true);
+  }
+}
+
+/**
+ * 拷贝日志到剪贴板。
+ */
+async function copyLogs() {
+  try {
+    if (!logsText() || logsText() === '暂无日志') {
+      await loadLogs();
+    }
+    await navigator.clipboard.writeText(logsText());
+    showMessage('日志已拷贝到剪贴板', false);
+  } catch (error) {
+    showMessage(`日志拷贝失败: ${String(error)}`, true);
+  }
+}
+
+/**
+ * 清空汇总日志。
+ */
+async function clearLogs() {
+  try {
+    await chrome.runtime.sendMessage({ type: 'CLEAR_LOGS' });
+    logsText.set('暂无日志');
+    showMessage('日志已清空', false);
+  } catch (error) {
+    showMessage(`日志清空失败: ${String(error)}`, true);
+  }
 }
 
 /**
@@ -127,6 +200,36 @@ function InfoItem(props: { label: string; value: string }) {
 }
 
 /**
+ * 日志面板。
+ */
+function LogsPanel() {
+  return (
+    <details
+      class="logs"
+      ref={(el) => {
+        // 首次展开时拉取日志
+        const handler = () => {
+          if ((el as HTMLDetailsElement).open) {
+            loadLogs();
+          }
+        };
+        el.addEventListener('toggle', handler);
+        return () => el.removeEventListener('toggle', handler);
+      }}
+    >
+      <summary>运行日志（排查问题用）</summary>
+      <div class="logs-actions">
+        <button class="log-btn" onClick={loadLogs}>刷新</button>
+        <button class="log-btn" onClick={downloadLogs}>下载日志</button>
+        <button class="log-btn" onClick={copyLogs}>拷贝</button>
+        <button class="log-btn" onClick={clearLogs}>清空</button>
+      </div>
+      <pre class="logs-view">{logsText() || '点「刷新」加载日志'}</pre>
+    </details>
+  );
+}
+
+/**
  * Popup 根组件。
  */
 export function App() {
@@ -191,6 +294,19 @@ export function App() {
       {message() ? (
         <div class={isError() ? 'message error' : 'message'}>{message()}</div>
       ) : null}
+
+      {s().recentApiUrls && s().recentApiUrls!.length > 0 ? (
+        <details class="debug">
+          <summary>API 捕获诊断 ({s().recentApiUrls!.length})</summary>
+          <ul>
+            {s().recentApiUrls!.map((u) => (
+              <li>{u}</li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+
+      <LogsPanel />
     </div>
   );
 }
