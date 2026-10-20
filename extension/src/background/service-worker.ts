@@ -349,6 +349,7 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
       sessionId: string;
       messages: RawMessage[];
       historyRequest?: CapturedApiRequest;
+      fetchPageRequest?: CapturedApiRequest;
       error?: string;
     }>(tabId, { type: 'EXPORT_CURRENT' });
 
@@ -369,10 +370,10 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
       count: messages.length,
     });
 
-    // 拉取会话元数据（标题等），失败时使用占位信息
+    // 拉取会话元数据（标题等），使用页面真实请求配置；失败时使用占位信息
     let sessionInfo: SessionSummary | null = null;
     try {
-      const list = await fetchAllSessions(tabId);
+      const list = await fetchAllSessions(tabId, sessionData.fetchPageRequest);
       sessionInfo = list.find((s) => s.id === sessionId) || null;
       logger.info('exportCurrent session info', {
         found: Boolean(sessionInfo),

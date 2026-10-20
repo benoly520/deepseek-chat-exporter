@@ -413,6 +413,7 @@ function handleMessage(message: ExtensionMessage, sendResponse: (response?: any)
       sessionId: currentSessionId,
       messages: capturedMessages,
       historyRequest: findRequest('history'),
+      fetchPageRequest: findRequest('fetchPage'),
     });
   } else if (message.type === 'EXPORT_ALL') {
     logger.info('EXPORT_ALL requested', {
