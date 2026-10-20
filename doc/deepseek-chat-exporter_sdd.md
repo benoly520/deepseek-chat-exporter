@@ -289,18 +289,92 @@ extension/
 
 #### 4.2.6 学习式批量删除（`deleteSessions` + 模板机制）
 
-删除端点无法猜测且不可逆，采用「让用户的一次真实操作当模板」的设计：
+##### 背景与动机
 
-1. **捕获**：用户在 DeepSeek 页面手动删除任意一个会话，fetch hook 识别 `kind === 'delete'`，
-   content script 立即上报 `DELETE_REQUEST_CAPTURED`（完整 url / method / body）。
-2. **学习**：SW 保存模板到内存 + `chrome.storage.local`（SW 休眠 / 重启不丢失），
-   `GET_STATUS` 返回 `deleteTemplateReady`，popup 据此启用「删除选中」。
-3. **重放**：`buildDeleteRequest` 深度遍历模板 body（`replaceUuids`），凡命中 UUID 正则的
-   字符串替换为目标会话 ID（UUID 数组整体替换），无需假设 body 字段结构；
-   经 FETCH_PROXY 重放（method/url/body 形态与真实请求一致，避免 405），逐个执行、限速、
-   单个失败不中断。
+DeepSeek 的删除会话端点（如 `chat_session/delete`）与列表 / 历史接口不同：
 
-### 4.3 导出 JSON Schema
+- **无文档**：不属于只读的数据拉取接口，页面 JS 中的请求构造逻辑难以静态逆向；
+- **不可猜测**：URL、HTTP method、body 结构均无法像 `fetch_page` 那样凭约定拼出，猜错即为一次
+  不可逆的误操作风险；
+- **不可逆**：失败代价高，宁可「不可用」也不能「误删」。
+
+因此不采用「硬编码端点 + 猜测 body」的传统做法，而是**让用户的一次真实操作充当接口文档**——
+学习式（Learn-by-observation）适配：观察用户手动删除时页面实际发出的请求，将其作为模板重放。
+
+##### 设计原则
+
+1. **不猜测**：任何请求字段都不硬编码，全部来自页面真实请求的逐字节捕获；
+2. **不越权**：扩展自身从不主动构造删除语义，仅重放用户操作产生的请求形态；
+3. **可校验**：模板持久化、状态可见（`deleteTemplateReady`），用户始终知道扩展「学会了没有」；
+4. **可恢复**：模板持久化到 storage，SW 休眠 / 浏览器重启后仍可用。
+
+##### 完整流程（三阶段）
+
+```
+阶段一 捕获（页面上下文）
+  用户在 DeepSeek 页面手动删除任意一个会话
+    → fetch hook 拦截该请求（发出前记录 url / method / body）
+    → 分类为 kind === 'delete'（正则 chat_session/delete|/delete）
+    → content script 去重后上报 DELETE_REQUEST_CAPTURED
+
+阶段二 学习（service worker）
+  收到 DELETE_REQUEST_CAPTURED
+    → 保存模板至内存（deleteTemplate）+ chrome.storage.local（持久化）
+    → SW 冷启动时从 storage 恢复
+    → GET_STATUS 返回 deleteTemplateReady=true，popup 启用「删除选中」
+
+阶段三 重放（service worker → 页面上下文）
+  用户勾选会话并确认删除
+    → 逐个会话：buildDeleteRequest 用模板 body 深度替换 UUID 为目标 ID
+    → 经 FETCH_PROXY 在页面上下文重放（携带页面 Bearer Token）
+    → 每 5 个暂停 800ms 限速；单个失败记录并继续，不中断批次
+```
+
+##### 关键数据结构
+
+```typescript
+/** hook 捕获的删除请求模板（原样保存，重放时仅替换 body 中的会话 ID） */
+interface CapturedApiRequest {
+  kind: 'delete';
+  url: string;      // 真实端点（含 query）
+  method: string;   // 真实 method（如 DELETE / POST）
+  body?: string;    // 真实请求体字符串
+}
+
+// 持久化：chrome.storage.local，键 'ds_exporter_delete_template'
+```
+
+##### UUID 替换策略（`replaceUuids`，核心技巧）
+
+删除请求 body 的确切结构未知，不做字段级解析，而是**深度遍历整个 JSON**：
+
+- 字符串节点：命中 UUID 正则（`/^[0-9a-f]{8}-…-[0-9a-f]{12}$/i`）→ 替换为目标会话 ID；
+- 数组节点：若元素含 UUID 字符串 → 整组替换为目标 ID 数组（兼容批量 body 形态）；
+- 对象节点：递归遍历所有键值。
+
+这样无论 body 是 `{ "chat_session_id": "..." }` 还是 `{ "ids": [...] }` 等任意结构都能兼容，
+且不会误伤非 ID 字段（时间戳、标题等不匹配 UUID 格式）。
+
+##### 防护措施
+
+| 措施 | 说明 |
+|------|------|
+| 学习门槛 | 未捕获到模板前，「删除选中」按钮禁用且有引导文案 |
+| 二次确认 | 单个 / 批量删除均弹出统一风格确认弹窗，红色警示「不可恢复」 |
+| 逐个执行 | 不做批量语义请求（body 一次只替换一个 ID），避免批量端点语义差异导致误删 |
+| 限速 | 每 5 个请求暂停 800ms |
+| 失败隔离 | 单个失败记录到日志并继续，批次结束时汇报成功 / 失败数 |
+| 全程日志 | 开始（含模板 url/method，warn 级）/ 每个结果 / 结束汇总均打点 |
+
+##### 局限与风险
+
+- 模板依赖一次真实删除操作，首次使用前需用户配合（popup 有明确引导）；
+- 若 DeepSeek 未来变更删除端点或 body 结构，已学模板可能失效——重放失败会逐个报错，
+  用户重新手动删除一次即可重新学习；
+- 模板与账号无关（仅含请求形态），但 Token 每次重放时实时取页面当前值，不做持久化。
+
+该模式可推广到任何「无文档 + 不可逆 + 难以静态逆向」的私有 API 场景：
+**观察一次真实交互 → 捕获请求形态 → 参数化重放**。
 
 ```typescript
 interface ExportedConversation {
