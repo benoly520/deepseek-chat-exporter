@@ -116,6 +116,8 @@ export interface StatusPayload {
   capturedMessages: number;
   exporting: boolean;
   exportProgress: number;
+  /** 批量导出详情（仅 SW 侧填充）：正在导出第几个会话 */
+  exportCurrent?: { index: number; total: number; title: string } | null;
   /** 诊断用：最近捕获到的 /api/ 请求 URL（最新在前，最多 20 条） */
   recentApiUrls?: string[];
   /** 诊断用：状态获取失败的详细原因（如 content script 不可达） */

@@ -32,6 +32,8 @@ logStore.init();
 // 状态
 let exportInProgress = false;
 let exportProgress = 0;
+/** 批量导出详情：正在导出第几个会话（标题） */
+let exportCurrent: { index: number; total: number; title: string } | null = null;
 
 /** DeepSeek API 基地址 */
 const API_BASE = 'https://chat.deepseek.com';
@@ -104,6 +106,8 @@ async function getActiveDeepSeekTabId(): Promise<number | null> {
 
 /**
  * 获取当前状态。
+ * content script 提供连接/捕获信息；导出状态以 SW 为权威源覆盖
+ * （否则 popup 轮询会用 content 的 exporting:false 把进度条覆盖消失）。
  */
 async function getStatus(sendResponse: (response: StatusPayload) => void) {
   const idleStatus: StatusPayload = {
@@ -113,6 +117,7 @@ async function getStatus(sendResponse: (response: StatusPayload) => void) {
     capturedMessages: 0,
     exporting: exportInProgress,
     exportProgress,
+    exportCurrent,
   };
 
   const tabId = await getActiveDeepSeekTabId();
@@ -124,7 +129,17 @@ async function getStatus(sendResponse: (response: StatusPayload) => void) {
 
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: 'GET_STATUS' });
-    sendResponse(response ?? { ...idleStatus, swError: 'content script 空响应' });
+    if (response) {
+      // 合并：连接/捕获信息取 content，导出状态以 SW 为准
+      sendResponse({
+        ...response,
+        exporting: exportInProgress,
+        exportProgress,
+        exportCurrent,
+      });
+    } else {
+      sendResponse({ ...idleStatus, swError: 'content script 空响应' });
+    }
   } catch (error) {
     // content script 未注入（页面尚未刷新过）等场景
     logger.warn('GET_STATUS: content script unreachable', String(error));
@@ -399,10 +414,12 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
 
     exportInProgress = false;
     exportProgress = 100;
+    exportCurrent = null;
     sendResponse({ success: true, filename });
   } catch (error) {
     exportInProgress = false;
     exportProgress = 0;
+    exportCurrent = null;
     logger.error('exportCurrent failed', String(error));
     sendResponse({ error: String(error) });
   }
@@ -448,12 +465,13 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
       const session = sessions[i];
 
       exportProgress = Math.round((i / totalSessions) * 100);
+      exportCurrent = { index: i + 1, total: totalSessions, title: session.title || 'Untitled' };
 
       // 向 popup 广播进度，无监听时忽略
       try {
         const result = chrome.runtime.sendMessage({
           type: 'EXPORT_PROGRESS',
-          payload: { progress: exportProgress },
+          payload: { progress: exportProgress, current: i + 1, total: totalSessions, title: session.title || 'Untitled' },
         } as ExtensionMessage);
         if (result && typeof result.catch === 'function') {
           result.catch(() => {});
@@ -503,10 +521,12 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
 
     exportInProgress = false;
     exportProgress = 100;
+    exportCurrent = null;
     sendResponse({ success: true, filename, count: conversations.length });
   } catch (error) {
     exportInProgress = false;
     exportProgress = 0;
+    exportCurrent = null;
     logger.error('exportAll failed', String(error));
     sendResponse({ error: String(error) });
   }

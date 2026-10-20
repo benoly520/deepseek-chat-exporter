@@ -28,8 +28,36 @@ const isError = signal(false);
 /** 汇总日志文本（从 service worker 拉取） */
 const logsText = signal('');
 
-// 进度监听只注册一次
+// 进度监听只注册一次（popup 打开期间始终监听，不只在导出点击后）
 let progressListenerAdded = false;
+
+/**
+ * 注册批量导出进度监听（幂等）。
+ */
+function ensureProgressListener() {
+  if (progressListenerAdded) return;
+  progressListenerAdded = true;
+  chrome.runtime.onMessage.addListener((msg: ExtensionMessage) => {
+    if (msg.type === 'EXPORT_PROGRESS') {
+      const payload = msg.payload as
+        | { progress: number; current?: number; total?: number; title?: string }
+        | undefined;
+      if (payload) {
+        const s = status.peek();
+        status.set({
+          ...s,
+          exporting: true,
+          exportProgress: payload.progress,
+          exportCurrent: {
+            index: payload.current ?? 0,
+            total: payload.total ?? 0,
+            title: payload.title ?? '',
+          },
+        });
+      }
+    }
+  });
+}
 
 /**
  * 从 background 获取当前状态。
@@ -154,19 +182,7 @@ async function exportAll() {
   showMessage('', false);
 
   try {
-    // 注册进度监听（仅注册一次，避免重复监听）
-    if (!progressListenerAdded) {
-      chrome.runtime.onMessage.addListener((msg: ExtensionMessage) => {
-        if (msg.type === 'EXPORT_PROGRESS') {
-          const payload = msg.payload as { progress: number } | undefined;
-          if (payload) {
-            const s = status.peek();
-            status.set({ ...s, exportProgress: payload.progress });
-          }
-        }
-      });
-      progressListenerAdded = true;
-    }
+    ensureProgressListener();
 
     const response = await chrome.runtime.sendMessage({ type: 'EXPORT_ALL' });
 
@@ -182,7 +198,7 @@ async function exportAll() {
     showMessage(`导出失败: ${String(error)}`, true);
   } finally {
     const s = status.peek();
-    status.set({ ...s, exporting: false, exportProgress: 0 });
+    status.set({ ...s, exporting: false, exportProgress: 0, exportCurrent: null });
   }
 }
 
@@ -239,7 +255,8 @@ export function App() {
     <div
       class="popup"
       ref={() => {
-        // 轮询状态；返回清理函数，popup 关闭时停止定时器
+        // 注册进度监听 + 轮询状态；返回清理函数，popup 关闭时停止定时器
+        ensureProgressListener();
         fetchStatus();
         const timer = setInterval(fetchStatus, 2000);
         return () => {
@@ -287,10 +304,15 @@ export function App() {
 
       {s().exporting ? (
         <div class="progress">
+          <div class="progress-title">
+            {s().exportCurrent && s().exportCurrent.total > 0
+              ? `正在导出 ${s().exportCurrent.index}/${s().exportCurrent.total}：${s().exportCurrent.title}`
+              : `导出中… ${s().exportProgress}%`}
+          </div>
           <div class="progress-bar">
             <div class="progress-fill" style={`width:${s().exportProgress}%`} />
           </div>
-          <div class="progress-text">{s().exportProgress}%</div>
+          <div class="progress-hint">耗时操作，请保持 DeepSeek 页面开启</div>
         </div>
       ) : null}
 
