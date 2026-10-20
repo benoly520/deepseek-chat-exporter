@@ -65,15 +65,12 @@ export interface HistoryMessagesResponse {
 
 export interface RawMessage {
   id?: string;
-  role: string;
-  content: string;
+  role?: string;
+  content?: string;
   thinking?: string;
-  created_at?: string;
-  attachments?: Array<{
-    type: string;
-    url: string;
-    name?: string;
-  }>;
+  created_at?: unknown;
+  // v0 API 消息字段结构与旧假设不同，放宽以兼容任意形态（正文可能嵌套在片段结构里）
+  [key: string]: unknown;
 }
 
 // --- SSE 类型 ---

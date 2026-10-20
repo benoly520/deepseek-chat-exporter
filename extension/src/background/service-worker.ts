@@ -385,7 +385,10 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
 
     const conversation = buildConversation(
       sessionInfo || { id: sessionId, title: 'Exported Conversation' },
-      messages
+      messages,
+      (_msg, sample) => {
+        logger.error('消息正文提取失败（消息结构样本）', sample);
+      }
     );
 
     const exportData = buildExportJSON([conversation]);
@@ -463,7 +466,9 @@ async function exportAllConversations(sendResponse: (response: any) => void) {
         const historyData = await fetchHistoryMessages(tabId, session.id, allSessionsData.historyRequest);
 
         if (historyData) {
-          const conversation = buildConversation(session, historyData);
+          const conversation = buildConversation(session, historyData, (_msg, sample) => {
+            logger.error('消息正文提取失败（消息结构样本）', { sessionId: session.id, sample });
+          });
           conversations.push(conversation);
           logger.debug('exportAll session ok', {
             i,

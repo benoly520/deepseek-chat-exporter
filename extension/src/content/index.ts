@@ -253,6 +253,8 @@ function handleCapturedData(type: string, data: unknown) {
         count: capturedMessages.length,
         sampleRoles: messages.slice(0, 3).map((m) => m.role),
         firstKeys: messages[0] ? Object.keys(messages[0]).join(',') : '(empty)',
+        // 首条消息完整 JSON（截断），用于确认真实字段结构
+        firstSample: messages[0] ? JSON.stringify(messages[0]).slice(0, 1200) : '(empty)',
       });
 
       notifyBackground({

@@ -231,3 +231,164 @@ function describeStructure(data: unknown): string {
     return '(unserializable)';
   }
 }
+
+/**
+ * 从消息对象中提取正文与思考过程。
+ *
+ * v0 API 的消息正文可能不在顶层 content 字段（如 fragment_content 片段数组），
+ * 这里做多级探测：
+ * 1. 顶层字符串字段（content / text 等）；
+ * 2. 顶层片段数组（fragment_content / content_chunks 等），拼接其中 text；
+ * 3. 深度扫描兜底：递归找片段数组或 key 匹配 content/text 的最长字符串。
+ *
+ * @param msg 原始消息对象
+ * @param sampleOut 可选，未提取到内容时回传消息 JSON 预览（供日志诊断真实字段）
+ */
+export function extractMessageBody(
+  msg: unknown,
+  sampleOut?: { sample: string }
+): { content: string; thinking?: string } {
+  const found: { content: string; thinking?: string } = { content: '' };
+
+  if (typeof msg !== 'object' || msg === null) {
+    return found;
+  }
+
+  const topLevel = msg as Record<string, unknown>;
+
+  // 1) 顶层字符串字段
+  const textKeys = ['content', 'text', 'message_content', 'content_text'];
+  for (const key of textKeys) {
+    const v = topLevel[key];
+    if (typeof v === 'string' && v.trim()) {
+      found.content = v;
+      break;
+    }
+  }
+
+  // 2) 顶层片段数组（元素为 {type, text} / {text} / 字符串）
+  if (!found.content) {
+    const fragKeys = [
+      'fragment_content',
+      'content_chunks',
+      'fragments',
+      'segments',
+      'content_segments',
+    ];
+    for (const key of fragKeys) {
+      const arr = topLevel[key];
+      if (Array.isArray(arr)) {
+        const joined = joinFragmentTexts(arr);
+        if (joined) {
+          found.content = joined;
+          break;
+        }
+      }
+    }
+  }
+
+  // 思考过程（常见命名）
+  const thinkingKeys = ['thinking', 'reasoning', 'thinking_content', 'reasoning_content'];
+  for (const key of thinkingKeys) {
+    const v = topLevel[key];
+    if (typeof v === 'string' && v.trim()) {
+      found.thinking = v;
+      break;
+    }
+  }
+
+  // 3) 深度扫描兜底（限制深度，避免误取 id 类字段）
+  if (!found.content) {
+    const deep = deepFindContent(msg, 0);
+    if (deep) {
+      found.content = deep;
+    }
+  }
+
+  if (!found.content && sampleOut) {
+    sampleOut.sample = describeStructure(msg);
+  }
+  return found;
+}
+
+/**
+ * 拼接片段数组中的文本（元素为 {type, text} / {text} / 字符串）。
+ */
+function joinFragmentTexts(arr: unknown[]): string {
+  const parts: string[] = [];
+  for (const item of arr) {
+    if (typeof item === 'string') {
+      parts.push(item);
+    } else if (typeof item === 'object' && item !== null) {
+      const t = item as Record<string, unknown>;
+      const text = t.text ?? t.content ?? t.value;
+      if (typeof text === 'string') {
+        parts.push(text);
+      }
+    }
+  }
+  return parts.join('');
+}
+
+/**
+ * 深度扫描消息对象，兜底提取正文：
+ * 优先找"片段数组"（元素带 text），其次取 key 匹配 content/text 的最长字符串。
+ */
+function deepFindContent(root: unknown, depth: number): string {
+  if (depth > 3 || typeof root !== 'object' || root === null) return '';
+
+  let bestText = '';
+  for (const [key, value] of Object.entries(root as Record<string, unknown>)) {
+    if (Array.isArray(value) && value.length > 0) {
+      const joined = joinFragmentTexts(value);
+      if (joined && joined.length > bestText.length) {
+        bestText = joined;
+      }
+    } else if (
+      typeof value === 'string' &&
+      /content|text/i.test(key) &&
+      !/query|id|type|status/i.test(key) &&
+      value.length > bestText.length
+    ) {
+      bestText = value;
+    } else if (typeof value === 'object' && value !== null) {
+      const nested = deepFindContent(value, depth + 1);
+      if (nested.length > bestText.length) {
+        bestText = nested;
+      }
+    }
+  }
+  return bestText;
+}
+
+/**
+ * 归一化 role 为小写（v0 API 返回 USER / ASSISTANT）。
+ */
+export function normalizeRole(role: unknown): 'user' | 'assistant' | 'system' {
+  const r = String(role || '').toLowerCase();
+  if (r === 'assistant' || r === 'user' || r === 'system') {
+    return r;
+  }
+  return r === 'bot' ? 'assistant' : (r as 'user' | 'assistant' | 'system');
+}
+
+/**
+ * 时间戳归一化为 ISO 字符串：
+ * 数字按 Unix 秒（>1e12 视为毫秒）转换；字符串尝试解析；无效返回空串。
+ */
+export function toIsoTimestamp(v: unknown): string {
+  if (typeof v === 'number' && isFinite(v)) {
+    const ms = v > 1e12 ? v : v * 1000;
+    const d = new Date(ms);
+    return isNaN(d.getTime()) ? '' : d.toISOString();
+  }
+  if (typeof v === 'string' && v) {
+    // 纯数字字符串也按时间戳处理
+    if (/^\d+(\.\d+)?$/.test(v)) {
+      return toIsoTimestamp(Number(v));
+    }
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? '' : d.toISOString();
+  }
+  return '';
+}
