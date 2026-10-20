@@ -3,7 +3,7 @@
  * 状态：与 background 轮询同步的连接状态 / 导出进度 / 提示消息 / 运行日志。
  */
 
-import { signal, resolve } from 'plain';
+import { signal, computed, resolve } from 'plain';
 import type { StatusPayload, ExtensionMessage } from '../types';
 import { formatAll } from '../utils/logger';
 import type { LogEntry } from '../utils/logger';
@@ -27,6 +27,15 @@ const isError = signal(false);
 
 /** 汇总日志文本（从 service worker 拉取） */
 const logsText = signal('');
+
+/** 进度区标题：批量导出显示 N/总数 + 会话标题，单会话导出显示百分比 */
+const progressTitle = computed(() => {
+  const cur = status().exportCurrent;
+  if (cur && cur.total > 0) {
+    return `正在导出 ${cur.index}/${cur.total}：${cur.title}`;
+  }
+  return `导出中… ${status().exportProgress}%`;
+});
 
 // 进度监听只注册一次（popup 打开期间始终监听，不只在导出点击后）
 let progressListenerAdded = false;
@@ -304,11 +313,7 @@ export function App() {
 
       {s().exporting ? (
         <div class="progress">
-          <div class="progress-title">
-            {s().exportCurrent && s().exportCurrent.total > 0
-              ? `正在导出 ${s().exportCurrent.index}/${s().exportCurrent.total}：${s().exportCurrent.title}`
-              : `导出中… ${s().exportProgress}%`}
-          </div>
+          <div class="progress-title">{progressTitle()}</div>
           <div class="progress-bar">
             <div class="progress-fill" style={`width:${s().exportProgress}%`} />
           </div>
