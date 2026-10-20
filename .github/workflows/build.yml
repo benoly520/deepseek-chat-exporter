@@ -1,0 +1,78 @@
+# 每次提交到 main 自动构建扩展并打包 dist.zip，更新 latest Release。
+# README 中的固定下载链接指向该 Release 资产：
+#   https://github.com/benoly520/deepseek-chat-exporter/releases/latest/download/deepseek-chat-exporter-extension.zip
+#
+# 注意：扩展依赖本地 link 的 plain-framework。
+# - 仓库公开：无需任何 secret，github.token 即可拉取；
+# - plain-framework 为私有仓库：需在仓库 Settings → Secrets 添加 ACTIONS_TOKEN
+#   （具有 plain-framework 读权限的 Personal Access Token）。
+
+name: build-extension
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 检出为子目录 deepseek-chat-exporter，与 plain-framework 同级，
+      # 复刻本地目录布局（package.json 中 plain 为 link:../../plain-framework，
+      # pnpm 生成的符号链接指向仓库根的同级 plain-framework）
+      - name: Checkout 扩展仓库
+        uses: actions/checkout@v4
+        with:
+          path: deepseek-chat-exporter
+
+      - name: Checkout plain-framework（同级放置）
+        uses: actions/checkout@v4
+        with:
+          repository: benoly520/plain-framework
+          path: plain-framework
+          # 公开仓库用默认 token 即可；私有仓库需配置 ACTIONS_TOKEN
+          token: ${{ secrets.ACTIONS_TOKEN || github.token }}
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: deepseek-chat-exporter/extension/pnpm-lock.yaml
+
+      - name: 构建扩展
+        working-directory: deepseek-chat-exporter/extension
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm build
+
+      - name: 读取扩展版本号
+        id: ver
+        run: echo "version=$(node -p "require('./deepseek-chat-exporter/extension/manifest.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: 打包 dist.zip
+        run: |
+          cd deepseek-chat-exporter/extension/dist
+          zip -r "$GITHUB_WORKSPACE/deepseek-chat-exporter-extension.zip" .
+
+      - name: 更新 latest Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build (v${{ steps.ver.outputs.version }})
+          body: |
+            自动构建产物（v${{ steps.ver.outputs.version }}，commit ${{ github.sha }}）。
+            下载解压后，在 chrome://extensions 开启开发者模式，加载解压出的目录即可安装。
+          files: deepseek-chat-exporter-extension.zip
+          make_latest: 'true'
+          allowUpdates: true
+          replace_assets: true

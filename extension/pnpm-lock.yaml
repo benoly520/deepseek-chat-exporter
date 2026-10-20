@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       plain:
-        specifier: link:/home/monom/dev/gitlab_remote/github/plain-framework
+        specifier: link:../../plain-framework
         version: link:../../plain-framework
     devDependencies:
       '@types/chrome':

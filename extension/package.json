@@ -7,7 +7,7 @@
     "build": "node build.js"
   },
   "dependencies": {
-    "plain": "link:/home/monom/dev/gitlab_remote/github/plain-framework"
+    "plain": "link:../../plain-framework"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.268",

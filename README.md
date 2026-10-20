@@ -58,6 +58,14 @@ deepseek-chat-exporter/
 
 ## Chrome 扩展使用
 
+### 下载安装（推荐，免构建）
+
+每次提交都会通过 GitHub Actions 自动构建并打包，直接下载最新版：
+
+**[⬇ 下载 deepseek-chat-exporter-extension.zip](https://github.com/benoly520/deepseek-chat-exporter/releases/latest/download/deepseek-chat-exporter-extension.zip)**
+
+解压后按下方「安装」步骤，加载解压出的目录即可。
+
 ### 构建
 
 ```bash
@@ -70,7 +78,7 @@ pnpm build
 
 1. 打开 `chrome://extensions`
 2. 开启「开发者模式」
-3. 点击「加载已解压的扩展程序」，选择 `extension/dist` 目录
+3. 点击「加载已解压的扩展程序」，选择解压出的目录（或本地构建的 `extension/dist` 目录）
 
 ### 导出与会话管理
 
