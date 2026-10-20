@@ -60,9 +60,10 @@ deepseek-chat-exporter/
 
 ### 下载安装（推荐，免构建）
 
-每次提交都会通过 GitHub Actions 自动构建并打包，直接下载最新版：
+扩展 zip 随仓库维护：每次本地 `pnpm build` 会自动重新打包 `dist` 为
+`extension/deepseek-chat-exporter-extension.zip`（随代码一起提交），点击直链下载最新版：
 
-**[⬇ 下载 deepseek-chat-exporter-extension.zip](https://github.com/benoly520/deepseek-chat-exporter/releases/latest/download/deepseek-chat-exporter-extension.zip)**
+**[⬇ 下载 deepseek-chat-exporter-extension.zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)**
 
 解压后按下方「安装」步骤，加载解压出的目录即可。
 

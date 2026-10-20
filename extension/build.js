@@ -11,6 +11,7 @@ import { execSync } from 'child_process';
 import { cpSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { packZip } from './pack-zip.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname);
@@ -40,6 +41,18 @@ run(`npx esbuild src/background/service-worker.ts --bundle --outfile=dist/backgr
 console.log('\n=== Step 3: Copying static files ===');
 cpSync(resolve(root, 'manifest.json'), resolve(root, 'dist/manifest.json'));
 cpSync(resolve(root, 'icons'), resolve(root, 'dist/icons'), { recursive: true });
+
+// 步骤 4：打包 dist 为 zip（提交到仓库后，README 里的直链即可下载最新版）
+console.log('\n=== Step 4: Packaging dist into zip ===');
+const zipPath = resolve(root, 'deepseek-chat-exporter-extension.zip');
+try {
+  // store 模式零依赖打包，不依赖系统 zip 命令
+  const count = packZip(resolve(root, 'dist'), zipPath);
+  console.log(`Packaged ${count} files: ${zipPath}`);
+} catch (error) {
+  // 打包失败不中断构建，仅提示手动处理
+  console.warn(`自动打包失败（${error.message}），请检查 dist 目录后重试`);
+}
 
 console.log('\n=== Build complete! ===');
 console.log('Load the extension from dist/ directory in chrome://extensions');
