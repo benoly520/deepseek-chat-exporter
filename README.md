@@ -1,5 +1,7 @@
 # deepseek-chat-exporter
 
+> **中文** | [English](README_EN.md)
+
 DeepSeek 网页版（chat.deepseek.com）聊天记录管理与离线查看工具——支持会话浏览、批量导出、批量删除与离线阅读，包含两个子项目：
 
 | 子项目 | 目录 | 技术栈 | 说明 | 下载 |
