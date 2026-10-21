@@ -1,75 +1,76 @@
 # deepseek-chat-exporter
 
-> **中文** | [English](README_EN.md)
+> [中文文档](README_ZH.md) | **English**
 
-DeepSeek 网页版（chat.deepseek.com）聊天记录管理与离线查看工具——支持会话浏览、批量导出、批量删除与离线阅读，包含两个子项目：
+A chat history management & offline viewing tool for DeepSeek Web (`chat.deepseek.com`) — browse conversations, batch-export, batch-delete, and read offline. Contains two sub-projects:
 
-| 子项目 | 目录 | 技术栈 | 说明 | 下载 |
+| Sub-project | Directory | Tech Stack | Description | Download |
 |--------|------|--------|------|------|
-| Chrome 扩展（管理端） | `extension/` | Manifest V3 + TypeScript + [plain-framework](https://benoly520.github.io/plain-framework/) + esbuild | 会话管理器：浏览 / 批量导出 / 批量删除聊天记录，导出为结构化 JSON | **[⬇ 最新构建 zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)** |
-| 查看器（展示端） | `viewer/` | [plain-framework](https://benoly520.github.io/plain-framework/) + markdown-it + highlight.js | 离线查看器：导入导出的 JSON，以气泡对话形式离线浏览 | — |
+| Chrome Extension (manager) | `extension/` | Manifest V3 + TypeScript + [plain-framework](https://benoly520.github.io/plain-framework/) + esbuild | Session manager: browse / batch-export / batch-delete chats, export to structured JSON | **[⬇ Latest build zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)** |
+| Viewer (presentation) | `viewer/` | [plain-framework](https://benoly520.github.io/plain-framework/) + markdown-it + highlight.js | Offline viewer: import exported JSON, browse as chat bubbles | — |
 
-> 软件设计文档（SDD）见 [doc/deepseek-chat-exporter_sdd.md](doc/deepseek-chat-exporter_sdd.md)，已随当前实现修订（v1.2.0）。
+> See the Software Design Document (SDD, in Chinese) at [doc/deepseek-chat-exporter_sdd.md](doc/deepseek-chat-exporter_sdd.md), revised to match the current implementation (v1.2.0).
 
-## 功能列表
+## Features
 
-### Chrome 扩展（导出端）
+### Chrome Extension (manager)
 
-- **会话管理器**：打开 popup 自动分页加载**全部**会话列表（keyset 翻页，不受单页数量限制），每行显示编号 / 标题 / 日期，支持全选 / 单选
-- **导出当前会话**：导出正在浏览的对话
-- **批量导出选中**：勾选的会话合并导出为一个 JSON，实时进度（N/总数 + 标题 + 百分比）
-- **批量删除会话**：学习式捕获删除接口（页面手动删除一次即学会），自定义弹窗二次确认，限速逐个重放
-- **正文容错提取**：多级探测（顶层字段 / 片段数组 / 深度扫描），兼容 v0 API 的嵌套消息结构，保留思考过程（thinking）
-- **运行日志**：content/SW 日志汇总持久化（SW 休眠不丢），可拉取 / 下载 / 拷贝 / 清空，日志头带扩展版本号
-- **诊断面板**：API 捕获诊断（最近 /api/ 请求 URL）与日志面板统一可折叠卡片
-- **状态可见**：popup 显示扩展版本号、连接状态、删除接口学习状态
-- **友好错误**：未登录 / 登录过期、页面未刷新（未连接）、无活跃标签页等场景均有明确提示
-- **防风控限速**：每 5 个请求暂停 800ms、翻页间隔 300ms，删除逐个执行
+- **Session manager**: opening the popup automatically loads the **full** session list with pagination (keyset paging — not limited by per-page size), each row shows index / title / date; select all or individual
+- **Export current session**: export the conversation you are viewing
+- **Batch export selected**: merge checked sessions into a single JSON, with live progress (N/total + title + percentage)
+- **Batch delete sessions**: learned delete endpoint (manually delete any session once on the page and the extension "learns" it), custom confirmation dialog, rate-limited one-by-one replay
+- **Fault-tolerant content extraction**: multi-level probing (top-level fields / fragment arrays / deep scan), compatible with the nested message structure of the v0 API, keeps the thinking process
+- **Runtime logs**: content/SW logs aggregated and persisted (survives SW suspension); fetch / download / copy / clear; log header carries the extension version
+- **Diagnostics panel**: API capture diagnostics (recent `/api/` request URLs) and log panel as unified collapsible cards
+- **Visible status**: popup shows the extension version, connection status, and delete-endpoint learning state
+- **Friendly errors**: clear prompts for not-logged-in / expired session, page not refreshed (not connected), no active tab, etc.
+- **Anti-rate-limit throttling**: pauses 800ms every 5 requests, 300ms between list pages; deletions run one by one
 
-### 查看器（展示端）
+### Viewer (presentation)
 
-- **导入**：拖拽 / 点击多选，多文件按会话 id 合并去重
-- **浏览**：气泡对话布局，会话侧栏（按更新时间倒序）
-- **渲染**：Markdown（代码高亮 / 表格 / 引用）+ 思考过程折叠块
-- **搜索**：标题与消息内容全文匹配过滤
-- **离线安全**：纯前端本地解析，零上传
+- **Import**: drag & drop / multi-select; multiple files merged and de-duplicated by conversation id
+- **Browse**: chat bubble layout with a session sidebar (sorted by update time, descending)
+- **Rendering**: Markdown (code highlight / tables / quotes) + collapsible thinking blocks
+- **Search**: full-text filtering by title and message content
+- **Offline & safe**: pure front-end local parsing, zero upload
 
-## 目录结构
+## Directory Structure
 
 ```
 deepseek-chat-exporter/
-├── doc/                # 设计文档（SDD）
-├── extension/          # Chrome 扩展
-│   ├── manifest.json   # MV3 清单
-│   ├── build.js        # 构建脚本（Vite 构建 popup + esbuild 构建 content/background）
+├── doc/                # Design document (SDD, in Chinese)
+├── extension/          # Chrome extension
+│   ├── manifest.json   # MV3 manifest
+│   ├── build.js        # Build script (Vite for popup + esbuild for content/background)
 │   ├── icons/
 │   └── src/
-│       ├── popup/      # 点击扩展图标弹出的 UI（plain / TSX）
-│       ├── content/    # content script：fetch hook 注入、路由监听、API 代理
-│       ├── background/ # service worker：导出编排（分页 + 限速）
+│       ├── popup/      # UI shown when clicking the extension icon (plain / TSX)
+│       ├── content/    # content script: fetch hook injection, route watching, API proxy
+│       ├── background/ # service worker: export orchestration (pagination + throttling)
 │       ├── types/
 │       └── utils/
-└── viewer/             # 查看器（plain-framework）
+└── viewer/             # Viewer (plain-framework)
     ├── index.html
     └── src/
         ├── components/ # FileLoader / ConversationList / ChatView
         ├── utils/      # json-parser / date-format / markdown
-        ├── state.ts    # 模块级 signal 状态
+        ├── state.ts    # module-level signal state
         └── App.tsx
 ```
 
-## Chrome 扩展使用
+## Chrome Extension Usage
 
-### 下载安装（推荐，免构建）
+### Download & Install (recommended, no build needed)
 
-扩展 zip 随仓库维护：每次本地 `pnpm build` 会自动重新打包 `dist` 为
-`extension/deepseek-chat-exporter-extension.zip`（随代码一起提交），点击直链下载最新版：
+The extension zip is maintained in the repository: every local `pnpm build` automatically
+re-packages `dist` into `extension/deepseek-chat-exporter-extension.zip` (committed with the code).
+Download the latest build via the direct link:
 
-**[⬇ 下载 deepseek-chat-exporter-extension.zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)**
+**[⬇ Download deepseek-chat-exporter-extension.zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)**
 
-解压后按下方「安装」步骤，加载解压出的目录即可。
+Unzip it, then follow the "Install" steps below and load the unzipped directory.
 
-### 构建
+### Build
 
 ```bash
 cd extension
@@ -77,43 +78,45 @@ pnpm install
 pnpm build
 ```
 
-### 安装
+### Install
 
-1. 打开 `chrome://extensions`
-2. 开启「开发者模式」
-3. 点击「加载已解压的扩展程序」，选择解压出的目录（或本地构建的 `extension/dist` 目录）
+1. Open `chrome://extensions`
+2. Enable "Developer mode"
+3. Click "Load unpacked" and select the unzipped directory (or the locally built `extension/dist` directory)
 
-### 导出与会话管理
+### Export & Session Management
 
-1. 打开 [chat.deepseek.com](https://chat.deepseek.com) 并登录（若扩展是后装的，先刷新一次页面）
-2. 点击扩展图标，popup 即为会话管理器：
-   - 自动分页加载**全部**会话列表（keyset 翻页，不受单页数量限制），每行显示编号 / 标题 / 日期
-   - **导出当前会话**：导出正在浏览的对话
-   - **导出选中**：默认全选，勾选后合并导出为一个 JSON（限速：每 5 个请求暂停 800ms，进度实时显示）
-   - **删除选中**：批量删除（学习式，见下），需自定义弹窗二次确认，不可恢复
+1. Open [chat.deepseek.com](https://chat.deepseek.com) and log in (if the extension was installed after the page, refresh the page once)
+2. Click the extension icon — the popup is the session manager:
+   - Automatically loads the **full** session list with pagination (keyset paging, not limited by per-page size); each row shows index / title / date
+   - **Export current session**: export the conversation you are viewing
+   - **Export selected**: all selected by default; checked sessions are merged into a single JSON (throttled: pauses 800ms every 5 requests, live progress)
+   - **Delete selected**: batch delete (learned, see below); requires a custom confirmation dialog — irreversible
 
-### 批量删除（学习式）
+### Batch Delete (learned)
 
-删除接口由 DeepSeek 页面内部使用、无文档且不可逆，扩展不硬编码：
-先在页面上**手动删除任意一个会话**，扩展会自动捕获这条真实请求作为模板（持久化保存），
-之后即可在 popup 中勾选批量删除。popup 顶部的「删除接口」状态会显示是否已学习。
+The delete endpoint is used internally by the DeepSeek page — undocumented and irreversible, so the
+extension does not hard-code it: first **manually delete any session on the page**, and the extension
+automatically captures that real request as a template (persisted). After that you can batch-delete
+from the popup. The "Delete endpoint" status at the top of the popup shows whether it has been learned.
 
-## 查看器使用
+## Viewer Usage
 
 ```bash
 cd viewer
 pnpm install
-pnpm dev         # 开发：http://localhost:5180
-pnpm build       # 构建产物在 viewer/dist
+pnpm dev         # dev: http://localhost:5180
+pnpm build       # output in viewer/dist
 ```
 
-打开页面后，把扩展导出的 JSON 拖入（或点击选择，支持多选合并），即可按会话浏览、搜索、渲染 Markdown 与思考过程。
+After opening the page, drag in the JSON exported by the extension (or click to select; multi-file
+merge is supported) to browse by conversation, search, and render Markdown and thinking processes.
 
-> 两个子项目的 `plain` 依赖均通过 `link:` 指向本地 `plain-framework` 仓库
-> （见各自 `package.json`，[文档地址](https://benoly520.github.io/plain-framework/)），
-> 使用前请确保该仓库已执行过 `pnpm install && pnpm run build`。两端均使用 pnpm 安装依赖。
+> The `plain` dependency of both sub-projects points to a local `plain-framework` repository via
+> `link:` (see each `package.json`, [docs](https://benoly520.github.io/plain-framework/)).
+> Make sure that repository has run `pnpm install && pnpm run build` first. Both use pnpm.
 
-## 导出 JSON 格式
+## Exported JSON Format
 
 ```json
 {
@@ -126,7 +129,7 @@ pnpm build       # 构建产物在 viewer/dist
   "conversations": [
     {
       "id": "5a298e61-4fd4-455b-9aaf-7c6142d727a0",
-      "title": "会话标题",
+      "title": "Conversation title",
       "model": "deepseek-chat",
       "created_at": "...",
       "updated_at": "...",
@@ -139,8 +142,8 @@ pnpm build       # 构建产物在 viewer/dist
 }
 ```
 
-## 安全说明
+## Security Notes
 
-- 所有请求均由用户浏览器发起，仅调用 DeepSeek 页面自身使用的 API，不上传任何数据到第三方
-- 唯一的写操作是「删除会话」：仅用户明确勾选并二次确认后执行，逐个重放页面真实请求形态
-- 查看器为纯前端应用，JSON 文件仅在本地解析
+- All requests are made by the user's own browser, only calling the same APIs the DeepSeek page itself uses; no data is sent to any third party
+- The only write operation is "delete session": executed only after the user explicitly checks items and confirms twice, replaying the page's real request shape one by one
+- The viewer is a pure front-end app; JSON files are parsed locally only
