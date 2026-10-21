@@ -2,6 +2,7 @@
  * 应用根组件：文件加载页 / 主视图（侧栏 + 聊天区）切换。
  */
 
+import './styles.css';
 import { conversations, searchQuery, setSearch, stats, loadFiles } from './state';
 import { FileLoader } from './components/FileLoader';
 import { ConversationList } from './components/ConversationList';
