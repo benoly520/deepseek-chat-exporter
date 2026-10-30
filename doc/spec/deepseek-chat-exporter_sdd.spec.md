@@ -14,7 +14,7 @@
 | 1.1.1 | 2026-10-20 | 会话 URL 实际形如 /a/chat/s/{uuid}（含 /s/ 段），修正 page-watcher 正则；API 匹配改为路径后缀式（兼容 /api/v0/... 版本前缀）；新增 XHR 拦截兜底；popup 增加「API 捕获诊断」区块 |
 | 1.1.2 | 2026-10-20 | manifest icons 由 SVG 改为 PNG（Chromium 不支持 SVG 图标，显示为字母占位符）；新增运行日志系统（content/SW 日志汇总持久化，popup 支持拉取 / 下载 / 拷贝 / 清空） |
 | 1.2.0 | 2026-10-20 | Popup 重构为会话管理器（自动加载全部列表 / 编号+日期 / 全选 / 导出选中 / 批量删除）；导出全部突破 100 条限制（keyset 翻页 lte_cursor.updated_at）；新增学习式批量删除（捕获真实删除请求作模板，深度替换 UUID 重放）；GET_STATUS 由 SW 合并权威导出状态（修复进度被轮询覆盖）；消息正文多级提取（v0 片段结构）；日志头带版本号；统一可折叠面板与自定义展开箭头 / 确认弹窗；未登录友好提示 |
-| 1.2.1 | 2026-10-30 | 修复"刷新列表报未登录"缺陷：兜底会话列表请求由错误的 `POST /api/chat_session/fetch_page`（被 SPA 前端路由接住返回 HTML）改为 v0 真实协议 `GET /api/v0/chat_session/fetch_page`；新增从捕获 URL 自适应发现端点、业务错误码（HTTP 200 + `code≠0`）识别，以及"端点不存在"与"真未登录"的提示分流 |
+| 1.2.1 | 2026-10-30 | 修复"刷新列表报未登录"缺陷：兜底会话列表请求由错误的 `POST /api/chat_session/fetch_page`（被 SPA 前端路由接住返回 HTML）改为 v0 真实协议 `GET /api/v0/chat_session/fetch_page`；新增从捕获 URL 自适应发现端点、业务错误码（HTTP 200 + `code≠0`）识别，以及"端点不存在"与"真未登录"的提示分流。同日 Chrome PC 登录态实测「刷新列表」恢复正常（缺陷根源与复盘见 `doc/bugfix/01.session-list-refresh-false-logout.bugfix.md`） |
 
 ## 1. 项目概述
 
