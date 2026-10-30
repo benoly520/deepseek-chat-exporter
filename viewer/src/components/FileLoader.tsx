@@ -4,6 +4,8 @@
 
 import { signal } from 'plain';
 import { loadFiles, loading, loadError } from '../state';
+import { LangSwitch } from './LangSwitch';
+import { t } from '../i18n';
 
 export function FileLoader() {
   const dragOver = signal(false);
@@ -19,9 +21,10 @@ export function FileLoader() {
 
   return (
     <div class="loader">
+      <LangSwitch />
       <div class="loader-inner">
         <h1>DeepSeek Chat Viewer</h1>
-        <div class="sub">导入 DeepSeek Chat Exporter 导出的 JSON 文件，离线浏览聊天记录</div>
+        <div class="sub">{t('loader.subtitle')}</div>
 
         <div
           class={dragOver() ? 'dropzone dragover' : 'dropzone'}
@@ -38,8 +41,8 @@ export function FileLoader() {
           }}
         >
           <div class="big">📂</div>
-          <div>拖拽 JSON 文件到此处，或点击选择文件</div>
-          <div class="hint">支持多选，多个文件将自动按会话 ID 合并</div>
+          <div>{t('loader.dropHint')}</div>
+          <div class="hint">{t('loader.multiHint')}</div>
         </div>
 
         <input
@@ -52,8 +55,10 @@ export function FileLoader() {
           }}
         />
 
-        {loadError() ? <div class="load-error">{loadError()}</div> : null}
-        {loading() ? <div class="load-loading">正在加载…</div> : null}
+        {loadError() ? (
+          <div class="load-error">{t(loadError()?.key ?? '', loadError()?.vars)}</div>
+        ) : null}
+        {loading() ? <div class="load-loading">{t('loader.loading')}</div> : null}
       </div>
     </div>
   );

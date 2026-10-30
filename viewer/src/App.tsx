@@ -7,6 +7,8 @@ import { conversations, searchQuery, setSearch, stats, loadFiles } from './state
 import { FileLoader } from './components/FileLoader';
 import { ConversationList } from './components/ConversationList';
 import { ChatView } from './components/ChatView';
+import { LangSwitch } from './components/LangSwitch';
+import { t } from './i18n';
 import { formatDateTime } from './utils/date-format';
 
 /**
@@ -31,13 +33,14 @@ function MainView() {
         <input
           class="search"
           type="text"
-          placeholder="搜索会话标题或消息内容…"
+          placeholder={t('app.searchPlaceholder')}
           value={searchQuery()}
           onInput={(e) => setSearch(e.target.value)}
         />
         <button class="btn-import" onClick={() => fileInput?.click()}>
-          导入文件
+          {t('app.import')}
         </button>
+        <LangSwitch />
         <input
           type="file"
           accept=".json,application/json"
@@ -55,8 +58,8 @@ function MainView() {
       </div>
 
       <div class="statusbar">
-        共 {s().totalConversations} 个会话 · {s().totalMessages} 条消息
-        {s().exportedAt ? ` · 导出时间: ${formatDateTime(s().exportedAt)}` : ''}
+        {t('app.status', { c: s().totalConversations, m: s().totalMessages })}
+        {s().exportedAt ? ` · ${t('app.exportedAt', { time: formatDateTime(s().exportedAt) })}` : ''}
       </div>
     </div>
   );

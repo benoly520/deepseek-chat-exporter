@@ -3,7 +3,7 @@
  */
 
 import { signal, computed } from 'plain';
-import { parseJSON, readFileAsText } from './utils/json-parser';
+import { parseJSON, readFileAsText, ViewerError } from './utils/json-parser';
 import type { Conversation, ExportedConversation, ExportMeta } from './types';
 
 // --- 原始状态 ---
@@ -18,8 +18,9 @@ export const currentId = signal<string | null>(null);
 export const searchQuery = signal('');
 /** 加载中 */
 export const loading = signal(false);
-/** 加载错误信息 */
-export const loadError = signal('');
+/** 加载错误：存 key + 参数而非成品文案，切换语言时已显示的提示也会重译 */
+export type LoadError = { key: string; vars?: Record<string, string | number> };
+export const loadError = signal<LoadError | null>(null);
 
 // --- 派生状态 ---
 
@@ -78,7 +79,7 @@ export async function loadFiles(fileList: File[]): Promise<void> {
   if (fileList.length === 0) return;
 
   loading.set(true);
-  loadError.set('');
+  loadError.set(null);
 
   try {
     let merged = conversations();
@@ -102,7 +103,15 @@ export async function loadFiles(fileList: File[]): Promise<void> {
       currentId.set(merged[0].id);
     }
   } catch (error) {
-    loadError.set(error instanceof Error ? error.message : '文件加载失败');
+    if (error instanceof ViewerError) {
+      loadError.set({ key: error.key, vars: error.vars });
+    } else {
+      // 未知异常兜底：带上原始信息，便于定位
+      loadError.set({
+        key: 'error.loadFailed',
+        vars: { msg: error instanceof Error ? error.message : String(error) },
+      });
+    }
   } finally {
     loading.set(false);
   }

@@ -43,6 +43,8 @@ Pinned tab — pinned sessions listed on their own page, each row carrying a “
 - **Rendering**: Markdown (code highlight / tables / quotes) + collapsible thinking blocks
 - **Search**: full-text filtering by title and message content
 - **Offline & safe**: pure front-end local parsing, zero upload
+- **Bilingual UI**: switch between Chinese and English at runtime without reload (choice persisted);
+  error messages and relative times follow the selected language
 
 ## Directory Structure
 

@@ -1,6 +1,6 @@
 # DeepSeek Chat 数据导出与展示工具 — 软件设计文档 (SDD)
 
-> 版本：1.2.4（2026-10-30 修订）
+> 版本：1.2.5（2026-10-30 修订）
 > 本文档由初版 SDD（Vue 3 方案）随实际实现修订而来，描述当前仓库的**真实架构**。
 > 与初版的主要差异：展示端与 Popup UI 统一改用 [plain-framework](https://benoly520.github.io/plain-framework/) 实现，
 > 导出端补充了鉴权代理、游标分页等落地决策，详见「修订记录」。
@@ -18,6 +18,7 @@
 | 1.2.2 | 2026-10-30 | 会话列表区分置顶会话：条目渲染置顶徽标，列表按 `pinned` 稳定排序（置顶组在前，组内保持接口返回顺序）；`pinned` 由 v0 `fetch_page` 响应透传，缺失或非布尔按未置顶处理；版本 1.0.15（变更提案与验收记录见 `doc/change/01.pinned-sessions-display.change.md`） |
 | 1.2.3 | 2026-10-30 | 会话列表改为「置顶 / 非置顶」双标签页；非置顶页按本地自然日分组（今天 / 昨天 / MM-DD 周X / 日期未知），分组可点击收起展开，默认只展开最近一天；序号为当前标签页内的可见行号（跨分组连续）；全选作用域收窄到当前标签页；稳定排序随之移除；版本 1.0.16（详见 `doc/change/01.pinned-sessions-display.change.md` §2.4.2） |
 | 1.2.4 | 2026-10-30 | 新增 popup 本地预览工具（`pnpm preview`）：`scripts/preview.mjs` 将 `dist/` 复制到 `.preview/`、生成只覆盖 popup 实际调用接口的 mock chrome 并注入，再由 Node 内置 http 提供服务；预览数据外置为 `scripts/preview-data.json`，会话以「距今天数」描述。用于免装扩展、免登录地验证 UI 与交互，不替代真机验收（详见 §4.6） |
+| 1.2.5 | 2026-10-30 | viewer 支持中英文界面切换：新增 `src/i18n.ts`（字典 + `lang` signal，`localStorage` 持久化，同步 `<html lang>`）与 `LangSwitch` 组件；错误提示改为存 key + 参数，切换语言时已显示的提示会重译；补充 plain 约定——原生元素属性须直接传表达式，传函数会被字符串化（变更提案见 `doc/change/03.viewer-i18n.change.md`） |
 
 ## 1. 项目概述
 
@@ -511,13 +512,15 @@ viewer/
 ├── index.html            # 页面骨架 + 全部样式（与 plain 官方示例一致）
 ├── vite.config.ts        # plain/vite 插件
 └── src/
-    ├── main.tsx          # 入口：mount('#app', App())
+    ├── main.tsx          # 入口：initLang() 后 mount('#app', App())
     ├── App.tsx           # 根组件：加载页 / 主视图切换（hidden 属性响应式切换）
     ├── state.ts          # 模块级 signal 状态（替代原 Pinia store）
+    ├── i18n.ts           # 中 / 英文案字典与语言 signal（localStorage 持久化）
     ├── components/
     │   ├── FileLoader.tsx          # 拖拽 / 多选导入
     │   ├── ConversationList.tsx    # 会话列表侧栏（过滤 + 选中态）
-    │   └── ChatView.tsx            # 聊天视图（气泡 / 思考块 / Markdown）
+    │   ├── ChatView.tsx            # 聊天视图（气泡 / 思考块 / Markdown）
+    │   └── LangSwitch.tsx          # 语言切换按钮（显示目标语言 EN / ZH）
     ├── utils/
     │   ├── json-parser.ts          # JSON 解析与 export_meta 校验
     │   ├── date-format.ts          # 本地时区日期格式化
@@ -551,6 +554,9 @@ viewer/
   （markdown-it 已关闭原始 HTML，内容安全；effect 在 ref 清理函数中回收）。
 - Markdown 渲染安全：`html: false` 防注入、`breaks: true` 适配聊天换行、
   外链统一 `target="_blank" rel="noopener noreferrer"`、代码块 highlight.js 高亮。
+- **原生元素属性直接传表达式**：`placeholder={t('key')}` 在 effect 内求值，会随 signal 更新；
+  传函数（`placeholder={() => t('key')}`）不会被解析，而是被 `String(fn)` 写进属性，
+  界面上直接显示出函数源码。`MaybeGetter` 只对**组件 props** 成立，原生元素不支持。
 
 ### 5.4 页面布局
 

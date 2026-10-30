@@ -6,6 +6,7 @@ import { signal, effect, resolve } from 'plain';
 import { currentConversation, currentId } from '../state';
 import { renderMarkdown } from '../utils/markdown';
 import { formatDateTime, formatTime } from '../utils/date-format';
+import { t } from '../i18n';
 import type { Message } from '../types';
 
 /**
@@ -18,7 +19,7 @@ function ThinkingBlock(props: { text: string }) {
   return (
     <div class="thinking">
       <button class="thinking-toggle" onClick={() => open.set(!open())}>
-        {open() ? '▼' : '▶'} 思考过程（点击{open() ? '收起' : '展开'}）
+        {open() ? '▼' : '▶'} {open() ? t('chat.thinkingCollapse') : t('chat.thinkingExpand')}
       </button>
       <div class="thinking-body" hidden={!open()}>
         {text()}
@@ -82,7 +83,7 @@ function MessageBubble(props: { msg: Message }) {
 
         {!isUser() ? (
           <button class="copy-btn" onClick={copyContent}>
-            复制原文
+            {t('chat.copy')}
           </button>
         ) : null}
       </div>
@@ -95,7 +96,7 @@ export function ChatView() {
 
   return (
     <div class="chat">
-      <div class="chat-title">{conv()?.title || '未选择会话'}</div>
+      <div class="chat-title">{conv()?.title || t('chat.noSelection')}</div>
 
       <div
         class="chat-scroll"
@@ -109,7 +110,7 @@ export function ChatView() {
         }}
       >
         {conv() === null ? (
-          <div class="chat-empty">从左侧选择一个会话开始浏览</div>
+          <div class="chat-empty">{t('chat.empty')}</div>
         ) : (
           (conv()?.messages || []).map((m) => <MessageBubble msg={m} />)
         )}

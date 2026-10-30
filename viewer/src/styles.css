@@ -33,14 +33,32 @@ body {
 .view-wrap[hidden] { display: none !important; }
 input[type='file'] { display: none; }
 
+/* ---------- 语言切换按钮 ---------- */
+.lang-switch {
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-muted);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.lang-switch:hover { border-color: var(--color-primary); color: var(--color-primary); }
+
 /* ---------- 文件加载页 ---------- */
 .loader {
+  position: relative;
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 24px;
 }
+/* 加载页的切换按钮固定右上角 */
+.loader > .lang-switch { position: absolute; top: 18px; right: 20px; }
 .loader-inner { width: 560px; max-width: 100%; text-align: center; }
 .loader-inner h1 { font-size: 26px; margin: 0 0 8px; }
 .loader-inner .sub { color: var(--color-muted); margin-bottom: 24px; }
