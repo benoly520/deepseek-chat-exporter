@@ -9,7 +9,7 @@ A chat history management & offline viewing tool for DeepSeek Web (`chat.deepsee
 | Chrome Extension (manager) | `extension/` | Manifest V3 + TypeScript + [plain-framework](https://benoly520.github.io/plain-framework/) + esbuild | Session manager: browse / batch-export / batch-delete chats, export to structured JSON | **[⬇ Latest build zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)** |
 | Viewer (presentation) | `viewer/` | [plain-framework](https://benoly520.github.io/plain-framework/) + markdown-it + highlight.js | Offline viewer: import exported JSON, browse as chat bubbles | — |
 
-> See the Software Design Document (SDD, in Chinese) at [doc/spec/deepseek-chat-exporter_sdd.spec.md](doc/spec/deepseek-chat-exporter_sdd.spec.md), revised to match the current implementation (v1.2.1). Defect post-mortems and change proposals live in [doc/bugfix/](doc/bugfix) and [doc/change/](doc/change).
+> See the Software Design Document (SDD, in Chinese) at [doc/spec/deepseek-chat-exporter_sdd.spec.md](doc/spec/deepseek-chat-exporter_sdd.spec.md), revised to match the current implementation (v1.2.3). Defect post-mortems and change proposals live in [doc/bugfix/](doc/bugfix) and [doc/change/](doc/change).
 
 ## Features
 

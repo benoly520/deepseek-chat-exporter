@@ -132,6 +132,37 @@
       color: #3b82f6;
     }
 
+    /* 列表标签页：置顶 / 非置顶 */
+    .list-tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+
+    .list-tab {
+      flex: 1;
+      padding: 5px 8px;
+      border: 1px solid #e5e7eb;
+      border-radius: 5px;
+      background: #f9fafb;
+      color: #6b7280;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .list-tab:hover {
+      border-color: #93c5fd;
+      color: #2563eb;
+    }
+
+    .list-tab.active {
+      border-color: #3b82f6;
+      background: #eff6ff;
+      color: #2563eb;
+      font-weight: 600;
+    }
+
     .list-loading {
       padding: 18px 10px;
       text-align: center;
@@ -141,9 +172,56 @@
       border-radius: 6px;
     }
 
+    .list-empty {
+      padding: 18px 10px;
+      text-align: center;
+      color: #9ca3af;
+      font-size: 12px;
+    }
+
+    /* 日期分组头：整行可点击收起 / 展开 */
+    .date-group-header {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 5px 8px;
+      background: #f9fafb;
+      border-bottom: 1px solid #e5e7eb;
+      cursor: pointer;
+      user-select: none;
+      font-size: 11px;
+      color: #6b7280;
+    }
+
+    .date-group-header:hover {
+      background: #f3f4f6;
+    }
+
+    .date-group-arrow {
+      flex-shrink: 0;
+      width: 10px;
+      text-align: center;
+    }
+
+    .date-group-label {
+      flex: 1;
+      font-weight: 600;
+    }
+
+    .date-group-count {
+      flex-shrink: 0;
+      color: #9ca3af;
+      font-variant-numeric: tabular-nums;
+    }
+
     .session-list {
       max-height: 220px;
       overflow-y: auto;
+      /* 同时裁剪水平方向，让粘性分组头与行背景不溢出容器圆角 */
+      overflow-x: hidden;
       border: 1px solid #e5e7eb;
       border-radius: 6px;
     }

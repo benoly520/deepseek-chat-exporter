@@ -35,6 +35,16 @@ const listLoading = signal(false);
 /** 列表加载进度（已加载条数，来自 SW 广播） */
 const listLoaded = signal(0);
 
+/** 当前标签页：置顶 / 非置顶 */
+type SessionTab = 'pinned' | 'normal';
+const activeTab = signal<SessionTab>('normal');
+
+/**
+ * 日期分组的显式展开状态（只记录用户点过的分组）。
+ * 未记录的分组按「第一个分组展开、其余收起」的默认规则判定。
+ */
+const groupExpanded = signal<Record<string, boolean>>({});
+
 /** 汇总日志文本（从 service worker 拉取） */
 const logsText = signal('');
 
@@ -72,11 +82,11 @@ function answerConfirm(ok: boolean) {
 }
 
 /**
- * 归一化会话时间字段并格式化为本地 "YYYY-MM-DD HH:mm"，取不到返回空串。
+ * 归一化会话时间字段为毫秒时间戳，取不到（缺失 / 无法解析）返回 null。
  */
-function formatSessionDate(s: SessionSummary): string {
+function sessionTimeMs(s: SessionSummary): number | null {
   const raw = s.updated_at ?? s.created_at;
-  if (raw === undefined || raw === null || raw === '') return '';
+  if (raw === undefined || raw === null || raw === '') return null;
   let ms: number;
   if (typeof raw === 'number') {
     // 秒级时间戳（>1e12 视为毫秒）
@@ -86,13 +96,55 @@ function formatSessionDate(s: SessionSummary): string {
     ms = n > 1e12 ? n : n * 1000;
   } else {
     const d = new Date(raw);
-    if (isNaN(d.getTime())) return '';
+    if (isNaN(d.getTime())) return null;
     ms = d.getTime();
   }
+  return isNaN(new Date(ms).getTime()) ? null : ms;
+}
+
+/**
+ * 归一化会话时间字段并格式化为本地 "YYYY-MM-DD HH:mm"，取不到返回空串。
+ */
+function formatSessionDate(s: SessionSummary): string {
+  const ms = sessionTimeMs(s);
+  if (ms === null) return '';
   const d = new Date(ms);
-  if (isNaN(d.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 日期分组的兜底键：会话时间缺失或无法解析时归入此组 */
+const UNKNOWN_DAY = 'unknown';
+
+/** 星期文案 */
+const WEEK_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+/**
+ * 取本地自然日的分组键 "YYYY-MM-DD"，时间不可用时返回 UNKNOWN_DAY。
+ */
+function dayKeyOf(ms: number | null): string {
+  if (ms === null) return UNKNOWN_DAY;
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/**
+ * 日期分组标题：今天 / 昨天 / MM-DD 周X（跨年补年份）。
+ */
+function formatDayLabel(key: string): string {
+  if (key === UNKNOWN_DAY) return '日期未知';
+  const now = Date.now();
+  if (key === dayKeyOf(now)) return '今天';
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (key === dayKeyOf(yesterday.getTime())) return '昨天';
+  const [y, m, d] = key.split('-').map(Number);
+  const week = WEEK_NAMES[new Date(y, m - 1, d).getDay()] ?? '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const md = `${pad(m)}-${pad(d)}`;
+  const yearText = y === new Date(now).getFullYear() ? md : `${y}-${md}`;
+  return `${yearText} ${week}`;
 }
 
 /**
@@ -111,8 +163,79 @@ const progressTitle = computed(() => {
   return `导出中… ${status().exportProgress}%`;
 });
 
-/** 已选数量 */
+/** 已选数量（跨标签页合计） */
 const selectedCount = computed(() => selected().size);
+
+/** 置顶会话（保持接口返回顺序，即时间倒序） */
+const pinnedList = computed(() => sessions().filter((s) => Boolean(s.pinned)));
+
+/** 非置顶会话（保持接口返回顺序，即时间倒序） */
+const normalList = computed(() => sessions().filter((s) => !s.pinned));
+
+/** 当前标签页的会话列表 */
+const currentList = computed(() =>
+  activeTab() === 'pinned' ? pinnedList() : normalList()
+);
+
+/** 当前标签页已选数量 */
+const currentCheckedCount = computed(() => {
+  const sel = selected();
+  return currentList().filter((s) => sel.has(s.id)).length;
+});
+
+/** 日期分组项：start 为该组首条在整个非置顶列表中的序号偏移 */
+type DateGroup = { key: string; label: string; start: number; items: SessionSummary[] };
+
+/**
+ * 非置顶会话按本地自然日分组。
+ * 组间按日期倒序（无日期的排最后），组内保持接口返回顺序。
+ */
+const dateGroups = computed<DateGroup[]>(() => {
+  const groups: DateGroup[] = [];
+  const index = new Map<string, DateGroup>();
+  for (const s of normalList()) {
+    const key = dayKeyOf(sessionTimeMs(s));
+    const hit = index.get(key);
+    if (hit) {
+      hit.items.push(s);
+    } else {
+      const group: DateGroup = { key, label: formatDayLabel(key), start: 0, items: [s] };
+      index.set(key, group);
+      groups.push(group);
+    }
+  }
+  // 组间排序：日期倒序，日期未知的固定排最后
+  groups.sort((a, b) => {
+    if (a.key === UNKNOWN_DAY) return 1;
+    if (b.key === UNKNOWN_DAY) return -1;
+    return b.key.localeCompare(a.key);
+  });
+  // 排序后再分配偏移，保证编号在展开的所有分组间连续
+  let offset = 0;
+  for (const g of groups) {
+    g.start = offset;
+    offset += g.items.length;
+  }
+  return groups;
+});
+
+/**
+ * 判断某个日期分组是否展开：用户手动设置过则以其为准，否则只有第一个分组展开。
+ */
+function isGroupExpanded(key: string, index: number): boolean {
+  const explicit = groupExpanded()[key];
+  return explicit === undefined ? index === 0 : explicit;
+}
+
+/**
+ * 切换某个日期分组的展开 / 收起状态。
+ */
+function toggleGroup(key: string, index: number) {
+  const cur = groupExpanded.peek();
+  const explicit = cur[key];
+  const expanded = explicit === undefined ? index === 0 : explicit;
+  groupExpanded.set({ ...cur, [key]: !expanded });
+}
 
 /**
  * 从 background 获取当前状态。
@@ -182,15 +305,23 @@ function toggleSelect(id: string, checked: boolean) {
 }
 
 /**
- * 全选 / 全不选。
+ * 全选 / 全不选：仅作用于当前标签页的会话（置顶页只动置顶项）。
  */
 function toggleAll() {
-  const list = sessions.peek();
-  if (selected.peek().size === list.length) {
-    selected.set(new Set());
-  } else {
-    selected.set(new Set(list.map((s) => s.id)));
+  const tab = activeTab.peek();
+  const cur = sessions
+    .peek()
+    .filter((s) => (tab === 'pinned' ? Boolean(s.pinned) : !s.pinned));
+  const next = new Set(selected.peek());
+  const allChecked = cur.length > 0 && cur.every((s) => next.has(s.id));
+  for (const s of cur) {
+    if (allChecked) {
+      next.delete(s.id);
+    } else {
+      next.add(s.id);
+    }
   }
+  selected.set(next);
 }
 
 /**
@@ -425,6 +556,7 @@ function InfoItem(props: { label: string; value: string }) {
 
 /**
  * 会话列表条目（编号 + 勾选框 + 置顶标记 + 标题 + 日期）。
+ * index 为当前标签页内的连续序号（从 0 起，跨日期分组连续）。
  */
 function SessionItem(props: { session: SessionSummary; index: number }) {
   const s = () => resolve(props.session);
@@ -458,23 +590,33 @@ function SessionItem(props: { session: SessionSummary; index: number }) {
 }
 
 /**
- * 会话列表面板。
+ * 会话列表面板：置顶 / 非置顶 两个标签页，非置顶列表按自然日分组且可折叠。
  */
 function SessionListPanel() {
-  const list = sessions;
-  // 置顶优先：pinned 排在前，组内保持接口返回顺序（Array#sort 自 ES2019 起稳定）
-  // 接口本身已按「置顶组 → 非置顶组」返回，这里只做防御性兜底
-  const ordered = computed(() => {
-    const arr = [...list()];
-    arr.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
-    return arr;
+  // 全选状态只看当前标签页：置顶页不因非置顶项未选而显示半选
+  const allChecked = computed(() => {
+    const cur = currentList();
+    const sel = selected();
+    return cur.length > 0 && cur.every((s) => sel.has(s.id));
   });
-  const allChecked = computed(
-    () => list().length > 0 && selected().size === list().length
-  );
 
   return (
     <div class="panel">
+      <div class="list-tabs">
+        <button
+          class={activeTab() === 'pinned' ? 'list-tab active' : 'list-tab'}
+          onClick={() => activeTab.set('pinned')}
+        >
+          置顶 ({pinnedList().length})
+        </button>
+        <button
+          class={activeTab() === 'normal' ? 'list-tab active' : 'list-tab'}
+          onClick={() => activeTab.set('normal')}
+        >
+          非置顶 ({normalList().length})
+        </button>
+      </div>
+
       <div class="panel-toolbar">
         <label class="check-all">
           <input
@@ -482,10 +624,10 @@ function SessionListPanel() {
             checked={allChecked()}
             onChange={toggleAll}
           />
-          全选
+          全选本页
         </label>
         <span class="muted">
-          已选 {selectedCount()} / {list().length}
+          已选 {currentCheckedCount()}/{currentList().length} · 共 {selectedCount()}
         </span>
         <button class="mini-btn" onClick={() => loadList(true)}>
           刷新列表
@@ -496,13 +638,40 @@ function SessionListPanel() {
         <div class="list-loading">
           正在加载会话列表… 已加载 {listLoaded()} 条
         </div>
-      ) : list().length === 0 ? (
+      ) : sessions().length === 0 ? (
         <div class="list-loading">点击「刷新列表」加载会话</div>
       ) : (
         <div class="session-list">
-          {ordered().map((s, i) => (
-            <SessionItem session={s} index={i} />
-          ))}
+          {activeTab() === 'pinned' ? (
+            pinnedList().length === 0 ? (
+              <div class="list-empty">暂无置顶会话</div>
+            ) : (
+              pinnedList().map((s, i) => <SessionItem session={s} index={i} />)
+            )
+          ) : dateGroups().length === 0 ? (
+            <div class="list-empty">暂无会话</div>
+          ) : (
+            dateGroups().map((g, gi) => {
+              const expanded = isGroupExpanded(g.key, gi);
+              return (
+                <div class="date-group">
+                  <div
+                    class="date-group-header"
+                    onClick={() => toggleGroup(g.key, gi)}
+                  >
+                    <span class="date-group-arrow">{expanded ? '▾' : '▸'}</span>
+                    <span class="date-group-label">{g.label}</span>
+                    <span class="date-group-count">{g.items.length}</span>
+                  </div>
+                  {expanded
+                    ? g.items.map((s, i) => (
+                        <SessionItem session={s} index={g.start + i} />
+                      ))
+                    : null}
+                </div>
+              );
+            })
+          )}
         </div>
       )}
     </div>
