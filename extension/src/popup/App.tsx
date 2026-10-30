@@ -424,7 +424,7 @@ function InfoItem(props: { label: string; value: string }) {
 }
 
 /**
- * 会话列表条目（编号 + 勾选框 + 标题 + 日期）。
+ * 会话列表条目（编号 + 勾选框 + 置顶标记 + 标题 + 日期）。
  */
 function SessionItem(props: { session: SessionSummary; index: number }) {
   const s = () => resolve(props.session);
@@ -432,6 +432,8 @@ function SessionItem(props: { session: SessionSummary; index: number }) {
   const index = () => resolve(props.index) + 1;
   const checked = () => selected().has(s().id);
   const date = () => formatSessionDate(s());
+  // pinned 由 v0 接口透传；缺失或非布尔时一律按「未置顶」处理，不报错、不影响列表加载
+  const pinned = () => Boolean(s().pinned);
 
   return (
     <label class="session-item">
@@ -441,6 +443,12 @@ function SessionItem(props: { session: SessionSummary; index: number }) {
         checked={checked()}
         onChange={(e) => toggleSelect(s().id, (e.target as HTMLInputElement).checked)}
       />
+      {/* 置顶标记：纯展示元素、不绑定事件，避免影响整行 label 的勾选行为 */}
+      {pinned() ? (
+        <span class="pin-badge" title="置顶会话">
+          置顶
+        </span>
+      ) : null}
       <span class="session-title" title={s().title}>
         {s().title || 'Untitled'}
       </span>
@@ -454,6 +462,13 @@ function SessionItem(props: { session: SessionSummary; index: number }) {
  */
 function SessionListPanel() {
   const list = sessions;
+  // 置顶优先：pinned 排在前，组内保持接口返回顺序（Array#sort 自 ES2019 起稳定）
+  // 接口本身已按「置顶组 → 非置顶组」返回，这里只做防御性兜底
+  const ordered = computed(() => {
+    const arr = [...list()];
+    arr.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+    return arr;
+  });
   const allChecked = computed(
     () => list().length > 0 && selected().size === list().length
   );
@@ -485,7 +500,7 @@ function SessionListPanel() {
         <div class="list-loading">点击「刷新列表」加载会话</div>
       ) : (
         <div class="session-list">
-          {list().map((s, i) => (
+          {ordered().map((s, i) => (
             <SessionItem session={s} index={i} />
           ))}
         </div>
