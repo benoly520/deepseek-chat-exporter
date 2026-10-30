@@ -8,6 +8,7 @@ import type { StatusPayload, ExtensionMessage, SessionSummary } from '../types';
 import { formatAll } from '../utils/logger';
 import { describeError } from '../utils/error';
 import type { LogEntry } from '../utils/logger';
+import { lang, setLang, t } from './i18n';
 
 // --- 状态 ---
 
@@ -21,10 +22,14 @@ const status = signal<StatusPayload>({
   exportProgress: 0,
 });
 
+/**
+ * 提示消息：存 key + 参数而非成品字符串，渲染时再翻译，
+ * 这样切换语言时已显示的提示也会跟着变。
+ */
+type MessageState = { key: string; vars?: Record<string, string | number>; error: boolean };
+
 /** 提示消息 */
-const message = signal('');
-/** 提示消息是否为错误 */
-const isError = signal(false);
+const message = signal<MessageState | null>(null);
 
 /** 会话列表（popup 本地副本） */
 const sessions = signal<SessionSummary[]>([]);
@@ -116,8 +121,12 @@ function formatSessionDate(s: SessionSummary): string {
 /** 日期分组的兜底键：会话时间缺失或无法解析时归入此组 */
 const UNKNOWN_DAY = 'unknown';
 
-/** 星期文案 */
-const WEEK_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+/**
+ * 周几文案：从字典取（按 | 分隔），用 Date.getDay() 索引。
+ */
+function weekdayNames(): string[] {
+  return t('date.weekdays').split('|');
+}
 
 /**
  * 取本地自然日的分组键 "YYYY-MM-DD"，时间不可用时返回 UNKNOWN_DAY。
@@ -133,14 +142,14 @@ function dayKeyOf(ms: number | null): string {
  * 日期分组标题：今天 / 昨天 / MM-DD 周X（跨年补年份）。
  */
 function formatDayLabel(key: string): string {
-  if (key === UNKNOWN_DAY) return '日期未知';
+  if (key === UNKNOWN_DAY) return t('date.unknown');
   const now = Date.now();
-  if (key === dayKeyOf(now)) return '今天';
+  if (key === dayKeyOf(now)) return t('date.today');
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (key === dayKeyOf(yesterday.getTime())) return '昨天';
+  if (key === dayKeyOf(yesterday.getTime())) return t('date.yesterday');
   const [y, m, d] = key.split('-').map(Number);
-  const week = WEEK_NAMES[new Date(y, m - 1, d).getDay()] ?? '';
+  const week = weekdayNames()[new Date(y, m - 1, d).getDay()] ?? '';
   const pad = (n: number) => String(n).padStart(2, '0');
   const md = `${pad(m)}-${pad(d)}`;
   const yearText = y === new Date(now).getFullYear() ? md : `${y}-${md}`;
@@ -151,16 +160,20 @@ function formatDayLabel(key: string): string {
  * 构造日志文本头部（版本号 + 导出时间 + 条数），便于定位用户环境。
  */
 function buildLogsHeader(entryCount: number): string {
-  return `DeepSeek Chat Exporter v${extVersion} · 导出时间 ${new Date().toLocaleString()} · 共 ${entryCount} 条日志`;
+  return t('logs.header', {
+    v: extVersion,
+    time: new Date().toLocaleString(),
+    n: entryCount,
+  });
 }
 
 /** 进度区标题：批量操作显示 N/总数 + 会话标题，单会话导出显示百分比 */
 const progressTitle = computed(() => {
   const cur = status().exportCurrent;
   if (cur && cur.total > 0) {
-    return `正在导出 ${cur.index}/${cur.total}：${cur.title}`;
+    return t('progress.current', { i: cur.index, total: cur.total, title: cur.title });
   }
-  return `导出中… ${status().exportProgress}%`;
+  return t('progress.exporting', { p: status().exportProgress });
 });
 
 /** 已选数量（跨标签页合计） */
@@ -231,10 +244,8 @@ function isGroupExpanded(key: string, index: number): boolean {
  * 切换某个日期分组的展开 / 收起状态。
  */
 function toggleGroup(key: string, index: number) {
-  const cur = groupExpanded.peek();
-  const explicit = cur[key];
-  const expanded = explicit === undefined ? index === 0 : explicit;
-  groupExpanded.set({ ...cur, [key]: !expanded });
+  // 在事件处理器里读取 signal 不会建立订阅，peek 与内联读取取到的都是最新值
+  groupExpanded.set({ ...groupExpanded.peek(), [key]: !isGroupExpanded(key, index) });
 }
 
 /**
@@ -255,9 +266,8 @@ async function fetchStatus() {
 /**
  * 设置提示消息。
  */
-function showMessage(text: string, error: boolean) {
-  message.set(text);
-  isError.set(error);
+function showMessage(key: string, error: boolean, vars?: Record<string, string | number>) {
+  message.set(key ? { key, vars, error } : null);
 }
 
 /**
@@ -276,16 +286,16 @@ async function loadList(force = false) {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'LOAD_SESSIONS' });
     if (response?.error) {
-      showMessage(`加载会话列表失败: ${response.error}`, true);
+      showMessage('msg.loadFailed', true, { err: response.error });
       return;
     }
     const list = (response?.sessions || []) as SessionSummary[];
     sessions.set(list);
     // 默认全选（全量导出语义）
     selected.set(new Set(list.map((s) => s.id)));
-    showMessage(`已加载 ${list.length} 个会话`, false);
+    showMessage('msg.loaded', false, { n: list.length });
   } catch (error) {
-    showMessage(`加载会话列表失败: ${describeError(error)}`, true);
+    showMessage('msg.loadFailed', true, { err: describeError(error) });
   } finally {
     listLoading.set(false);
   }
@@ -334,15 +344,15 @@ async function exportCurrent() {
     const response = await chrome.runtime.sendMessage({ type: 'EXPORT_CURRENT' });
 
     if (!response) {
-      throw new Error('无响应，请刷新页面后重试');
+      throw new Error(t('msg.noResponse'));
     }
     if (response.error) {
-      showMessage(`导出失败: ${response.error}`, true);
+      showMessage('msg.exportFailed', true, { err: response.error });
     } else {
-      showMessage(`导出成功: ${response.filename}`, false);
+      showMessage('msg.exported', false, { name: response.filename });
     }
   } catch (error) {
-    showMessage(`导出失败: ${describeError(error)}`, true);
+    showMessage('msg.exportFailed', true, { err: describeError(error) });
   } finally {
     const s = status.peek();
     status.set({ ...s, exporting: false, exportProgress: 0, exportCurrent: null });
@@ -355,7 +365,7 @@ async function exportCurrent() {
 async function exportSelected() {
   const ids = Array.from(selected.peek());
   if (ids.length === 0) {
-    showMessage('请先勾选要导出的会话', true);
+    showMessage('msg.selectFirstExport', true);
     return;
   }
   showMessage('', false);
@@ -367,15 +377,15 @@ async function exportSelected() {
     });
 
     if (!response) {
-      throw new Error('无响应，请刷新页面后重试');
+      throw new Error(t('msg.noResponse'));
     }
     if (response.error) {
-      showMessage(`导出失败: ${response.error}`, true);
+      showMessage('msg.exportFailed', true, { err: response.error });
     } else {
-      showMessage(`导出成功: ${response.filename} (${response.count} 个会话)`, false);
+      showMessage('msg.exportedMulti', false, { name: response.filename, n: response.count });
     }
   } catch (error) {
-    showMessage(`导出失败: ${describeError(error)}`, true);
+    showMessage('msg.exportFailed', true, { err: describeError(error) });
   } finally {
     const s = status.peek();
     status.set({ ...s, exporting: false, exportProgress: 0, exportCurrent: null });
@@ -388,19 +398,16 @@ async function exportSelected() {
 async function deleteSelected() {
   const ids = Array.from(selected.peek());
   if (ids.length === 0) {
-    showMessage('请先勾选要删除的会话', true);
+    showMessage('msg.selectFirstDelete', true);
     return;
   }
   if (!status.peek().deleteTemplateReady) {
-    showMessage(
-      '删除接口尚未学习：请先在 DeepSeek 页面上手动删除任意一个会话，扩展会自动捕获该操作',
-      true
-    );
+    showMessage('msg.deleteNotLearned', true);
     return;
   }
   if (
     !(await confirmDialog(
-      `即将永久删除 ${ids.length} 个会话，此操作不可恢复！确认继续？`
+      t('msg.deleteConfirm', { n: ids.length })
     ))
   ) {
     return;
@@ -414,19 +421,22 @@ async function deleteSelected() {
     });
 
     if (!response) {
-      throw new Error('无响应，请刷新页面后重试');
+      throw new Error(t('msg.noResponse'));
     }
     if (response.error) {
-      showMessage(`删除失败: ${response.error}`, true);
+      showMessage('msg.deleteFailed', true, { err: response.error });
     } else {
-      showMessage(`删除完成: 成功 ${response.ok} 个，失败 ${response.failed} 个`, response.failed > 0);
+      showMessage('msg.deleteDone', response.failed > 0, {
+        ok: response.ok,
+        failed: response.failed,
+      });
       // 从本地列表移除已删除项
       const deleted = new Set(ids);
       sessions.set(sessions.peek().filter((s) => !deleted.has(s.id)));
       selected.set(new Set());
     }
   } catch (error) {
-    showMessage(`删除失败: ${describeError(error)}`, true);
+    showMessage('msg.deleteFailed', true, { err: describeError(error) });
   } finally {
     const s = status.peek();
     status.set({ ...s, exporting: false, exportProgress: 0, exportCurrent: null });
@@ -440,17 +450,17 @@ async function loadLogs() {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_LOGS' });
     if (response?.error) {
-      logsText.set(`DeepSeek Chat Exporter v${extVersion} · 日志拉取失败: ${response.error}`);
+      logsText.set(t('logs.fetchFailed', { v: extVersion, err: response.error }));
     } else {
       const entries = (response?.entries || []) as LogEntry[];
       logsText.set(
         entries.length > 0
           ? `${buildLogsHeader(entries.length)}\n${formatAll(entries)}`
-          : `${buildLogsHeader(0)}\n暂无日志`
+          : `${buildLogsHeader(0)}\n${t('logs.none')}`
       );
     }
   } catch (error) {
-    logsText.set(`DeepSeek Chat Exporter v${extVersion} · 日志拉取失败: ${String(error)}`);
+    logsText.set(t('logs.fetchFailed', { v: extVersion, err: String(error) }));
   }
 }
 
@@ -460,7 +470,7 @@ async function loadLogs() {
 async function downloadLogs() {
   try {
     const text = logsText();
-    if (!text || text.endsWith('暂无日志')) {
+    if (!text || text.endsWith(t('logs.none'))) {
       await loadLogs();
     }
     const blob = new Blob([logsText()], { type: 'text/plain;charset=utf-8' });
@@ -473,7 +483,7 @@ async function downloadLogs() {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   } catch (error) {
-    showMessage(`日志下载失败: ${String(error)}`, true);
+    showMessage('logs.downloadFailed', true, { err: String(error) });
   }
 }
 
@@ -482,13 +492,13 @@ async function downloadLogs() {
  */
 async function copyLogs() {
   try {
-    if (!logsText() || logsText().endsWith('暂无日志')) {
+    if (!logsText() || logsText().endsWith(t('logs.none'))) {
       await loadLogs();
     }
     await navigator.clipboard.writeText(logsText());
-    showMessage('日志已拷贝到剪贴板', false);
+    showMessage('logs.copied', false);
   } catch (error) {
-    showMessage(`日志拷贝失败: ${String(error)}`, true);
+    showMessage('logs.copyFailed', true, { err: String(error) });
   }
 }
 
@@ -498,10 +508,10 @@ async function copyLogs() {
 async function clearLogs() {
   try {
     await chrome.runtime.sendMessage({ type: 'CLEAR_LOGS' });
-    logsText.set(`${buildLogsHeader(0)}\n暂无日志`);
-    showMessage('日志已清空', false);
+    logsText.set(`${buildLogsHeader(0)}\n${t('logs.none')}`);
+    showMessage('logs.cleared', false);
   } catch (error) {
-    showMessage(`日志清空失败: ${String(error)}`, true);
+    showMessage('logs.clearFailed', true, { err: String(error) });
   }
 }
 
@@ -577,15 +587,45 @@ function SessionItem(props: { session: SessionSummary; index: number }) {
       />
       {/* 置顶标记：纯展示元素、不绑定事件，避免影响整行 label 的勾选行为 */}
       {pinned() ? (
-        <span class="pin-badge" title="置顶会话">
-          置顶
+        <span class="pin-badge" title={t('item.pinTitle')}>
+          {t('item.pinBadge')}
         </span>
       ) : null}
       <span class="session-title" title={s().title}>
-        {s().title || 'Untitled'}
+        {s().title || t('item.untitled')}
       </span>
       {date() ? <span class="session-date">{date()}</span> : null}
     </label>
+  );
+}
+
+/**
+ * 单个日期分组（组头 + 可折叠的会话条目）。
+ *
+ * 展开状态必须用 computed 读取：若在渲染回调里把它求值成普通布尔（如 `const expanded =
+ * isGroupExpanded(...)`），则脱离依赖追踪，点组头只会改状态而不会重新渲染。
+ */
+function DateGroupPanel(props: { group: DateGroup; index: number }) {
+  const g = () => resolve(props.group);
+  const index = () => resolve(props.index);
+  const expanded = computed(() => isGroupExpanded(g().key, index()));
+
+  return (
+    <div class="date-group">
+      <div
+        class="date-group-header"
+        onClick={() => toggleGroup(g().key, index())}
+      >
+        <span class="date-group-arrow">{expanded() ? '▾' : '▸'}</span>
+        <span class="date-group-label">{g().label}</span>
+        <span class="date-group-count">{g().items.length}</span>
+      </div>
+      {expanded()
+        ? g().items.map((s, i) => (
+            <SessionItem session={s} index={g().start + i} />
+          ))
+        : null}
+    </div>
   );
 }
 
@@ -607,13 +647,13 @@ function SessionListPanel() {
           class={activeTab() === 'pinned' ? 'list-tab active' : 'list-tab'}
           onClick={() => activeTab.set('pinned')}
         >
-          置顶 ({pinnedList().length})
+          {t('list.tabPinned', { n: pinnedList().length })}
         </button>
         <button
           class={activeTab() === 'normal' ? 'list-tab active' : 'list-tab'}
           onClick={() => activeTab.set('normal')}
         >
-          非置顶 ({normalList().length})
+          {t('list.tabNormal', { n: normalList().length })}
         </button>
       </div>
 
@@ -624,53 +664,38 @@ function SessionListPanel() {
             checked={allChecked()}
             onChange={toggleAll}
           />
-          全选本页
+          {t('list.checkAll')}
         </label>
         <span class="muted">
-          已选 {currentCheckedCount()}/{currentList().length} · 共 {selectedCount()}
+          {t('list.summary', {
+            checked: currentCheckedCount(),
+            total: currentList().length,
+            all: selectedCount(),
+          })}
         </span>
         <button class="mini-btn" onClick={() => loadList(true)}>
-          刷新列表
+          {t('list.refresh')}
         </button>
       </div>
 
       {listLoading() ? (
         <div class="list-loading">
-          正在加载会话列表… 已加载 {listLoaded()} 条
+          {t('list.loading', { n: listLoaded() })}
         </div>
       ) : sessions().length === 0 ? (
-        <div class="list-loading">点击「刷新列表」加载会话</div>
+        <div class="list-loading">{t('list.loadHint')}</div>
       ) : (
         <div class="session-list">
           {activeTab() === 'pinned' ? (
             pinnedList().length === 0 ? (
-              <div class="list-empty">暂无置顶会话</div>
+              <div class="list-empty">{t('list.emptyPinned')}</div>
             ) : (
               pinnedList().map((s, i) => <SessionItem session={s} index={i} />)
             )
           ) : dateGroups().length === 0 ? (
-            <div class="list-empty">暂无会话</div>
+            <div class="list-empty">{t('list.empty')}</div>
           ) : (
-            dateGroups().map((g, gi) => {
-              const expanded = isGroupExpanded(g.key, gi);
-              return (
-                <div class="date-group">
-                  <div
-                    class="date-group-header"
-                    onClick={() => toggleGroup(g.key, gi)}
-                  >
-                    <span class="date-group-arrow">{expanded ? '▾' : '▸'}</span>
-                    <span class="date-group-label">{g.label}</span>
-                    <span class="date-group-count">{g.items.length}</span>
-                  </div>
-                  {expanded
-                    ? g.items.map((s, i) => (
-                        <SessionItem session={s} index={g.start + i} />
-                      ))
-                    : null}
-                </div>
-              );
-            })
+            dateGroups().map((g, gi) => <DateGroupPanel group={g} index={gi} />)
           )}
         </div>
       )}
@@ -696,18 +721,25 @@ function LogsPanel() {
         return () => el.removeEventListener('toggle', handler);
       }}
     >
-      <summary>运行日志（排查问题用）</summary>
+      <summary>{t('logs.title')}</summary>
       <div class="collapsible-body">
         <div class="logs-actions">
-          <button class="log-btn" onClick={loadLogs}>刷新</button>
-          <button class="log-btn" onClick={downloadLogs}>下载日志</button>
-          <button class="log-btn" onClick={copyLogs}>拷贝</button>
-          <button class="log-btn" onClick={clearLogs}>清空</button>
+          <button class="log-btn" onClick={loadLogs}>{t('logs.refresh')}</button>
+          <button class="log-btn" onClick={downloadLogs}>{t('logs.download')}</button>
+          <button class="log-btn" onClick={copyLogs}>{t('logs.copy')}</button>
+          <button class="log-btn" onClick={clearLogs}>{t('logs.clear')}</button>
         </div>
-        <pre class="logs-view">{logsText() || '点「刷新」加载日志'}</pre>
+        <pre class="logs-view">{logsText() || t('logs.hint')}</pre>
       </div>
     </details>
   );
+}
+
+/**
+ * 在中文 / 英文之间切换（写 signal 后持久化）。
+ */
+function toggleLang() {
+  setLang(lang.peek() === 'zh' ? 'en' : 'zh');
 }
 
 /**
@@ -735,22 +767,34 @@ export function App() {
           DeepSeek Exporter
           <span class="version">v{extVersion}</span>
         </h1>
-        <div class={s().connected ? 'status connected' : 'status'}>
-          {s().connected ? '已连接' : '未连接'}
+        <div class="header-right">
+          <button
+            class="lang-switch"
+            title={lang() === 'zh' ? t('lang.switchToEn') : t('lang.switchToZh')}
+            onClick={toggleLang}
+          >
+            {/* 用拉丁字母而非「中」字：英文系统往往没有中文字体，汉字会渲染成方框 */}
+            {lang() === 'zh' ? 'EN' : 'ZH'}
+          </button>
+          <div class={s().connected ? 'status connected' : 'status'}>
+            {s().connected ? t('app.connected') : t('app.disconnected')}
+          </div>
         </div>
       </div>
 
       {s().connected ? null : (
         <div class="tip">
-          未连接时请刷新 DeepSeek 页面后重试
-          {s().swError ? <div class="tip-detail">原因: {s().swError}</div> : null}
+          {t('app.disconnectedTip')}
+          {s().swError ? (
+            <div class="tip-detail">{t('app.reason', { msg: s().swError ?? '' })}</div>
+          ) : null}
         </div>
       )}
 
       <div class="info">
         <InfoItem
-          label="删除接口:"
-          value={s().deleteTemplateReady ? '已学习（可批量删除）' : '未学习（手动删除一次会话即可）'}
+          label={t('app.deleteApi')}
+          value={s().deleteTemplateReady ? t('app.deleteReady') : t('app.deleteNotReady')}
         />
       </div>
 
@@ -762,21 +806,21 @@ export function App() {
           disabled={!s().connected || !s().currentSessionId || s().exporting}
           onClick={exportCurrent}
         >
-          导出当前会话
+          {t('action.exportCurrent')}
         </button>
         <button
           class="btn btn-secondary"
           disabled={s().exporting || selectedCount() === 0}
           onClick={exportSelected}
         >
-          导出选中 ({selectedCount()})
+          {t('action.exportSelected', { n: selectedCount() })}
         </button>
         <button
           class="btn btn-danger"
           disabled={s().exporting || selectedCount() === 0 || !s().deleteTemplateReady}
           onClick={deleteSelected}
         >
-          删除选中 ({selectedCount()})
+          {t('action.deleteSelected', { n: selectedCount() })}
         </button>
       </div>
 
@@ -786,17 +830,19 @@ export function App() {
           <div class="progress-bar">
             <div class="progress-fill" style={`width:${s().exportProgress}%`} />
           </div>
-          <div class="progress-hint">耗时操作，请保持 DeepSeek 页面开启</div>
+          <div class="progress-hint">{t('progress.hint')}</div>
         </div>
       ) : null}
 
       {message() ? (
-        <div class={isError() ? 'message error' : 'message'}>{message()}</div>
+        <div class={message()?.error ? 'message error' : 'message'}>
+          {t(message()?.key ?? '', message()?.vars)}
+        </div>
       ) : null}
 
       {s().recentApiUrls && s().recentApiUrls!.length > 0 ? (
         <details class="collapsible">
-          <summary>API 捕获诊断 ({s().recentApiUrls!.length})</summary>
+          <summary>{t('diag.title', { n: s().recentApiUrls!.length })}</summary>
           <div class="collapsible-body">
             <ul class="url-list">
               {s().recentApiUrls!.map((u) => (
@@ -813,16 +859,16 @@ export function App() {
       {confirmVisible() ? (
         <div class="modal-mask">
           <div class="modal">
-            <div class="modal-title">删除确认</div>
+            <div class="modal-title">{t('modal.title')}</div>
             <div class="modal-text">
               <span class="modal-warn">⚠ {confirmText()}</span>
             </div>
             <div class="modal-actions">
               <button class="modal-btn" onClick={() => answerConfirm(false)}>
-                取消
+                {t('modal.cancel')}
               </button>
               <button class="modal-btn danger" onClick={() => answerConfirm(true)}>
-                确认删除
+                {t('modal.confirm')}
               </button>
             </div>
           </div>

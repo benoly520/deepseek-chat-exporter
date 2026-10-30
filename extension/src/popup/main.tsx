@@ -4,6 +4,7 @@
 
 import { mount } from 'plain';
 import { App } from './App';
+import { loadLang } from './i18n';
 import { createLocalLogger } from '../utils/logger';
 
 // popup 自身日志（转发 SW 持久化）
@@ -23,4 +24,5 @@ window.addEventListener('unhandledrejection', (e) => {
   logger.error('未处理的 Promise rejection', reason.slice(0, 1000));
 });
 
-mount('#app', App());
+// 先读取语言偏好再挂载，避免首屏先渲染默认语言再切换的闪烁
+loadLang().finally(() => mount('#app', App()));

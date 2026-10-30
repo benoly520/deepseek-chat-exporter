@@ -11,6 +11,16 @@ DeepSeek 网页版（chat.deepseek.com）聊天记录管理与离线查看工具
 
 > 软件设计文档（SDD）见 [doc/spec/deepseek-chat-exporter_sdd.spec.md](doc/spec/deepseek-chat-exporter_sdd.spec.md)，已随当前实现修订（v1.2.3）。缺陷复盘与变更提案分别见 [doc/bugfix/](doc/bugfix) 与 [doc/change/](doc/change)。
 
+## 界面预览
+
+会话管理器面板——置顶 / 非置顶双标签页，非置顶列表按自然日分组（可收起展开，默认只展开最近一天）：
+
+![会话管理器面板——非置顶标签页](doc/images/popup-session-list.png)
+
+置顶标签页——置顶会话单独成页，每一行带「置顶」徽标：
+
+![会话管理器面板——置顶标签页](doc/images/popup-pinned-tab.png)
+
 ## 功能列表
 
 ### Chrome 扩展（导出端）
@@ -38,7 +48,7 @@ DeepSeek 网页版（chat.deepseek.com）聊天记录管理与离线查看工具
 
 ```
 deepseek-chat-exporter/
-├── doc/                # 设计文档（SDD）
+├── doc/                # 设计文档：spec / change / bugfix，images 为截图
 ├── extension/          # Chrome 扩展
 │   ├── manifest.json   # MV3 清单
 │   ├── build.js        # 构建脚本（Vite 构建 popup + esbuild 构建 content/background）

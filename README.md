@@ -11,6 +11,16 @@ A chat history management & offline viewing tool for DeepSeek Web (`chat.deepsee
 
 > See the Software Design Document (SDD, in Chinese) at [doc/spec/deepseek-chat-exporter_sdd.spec.md](doc/spec/deepseek-chat-exporter_sdd.spec.md), revised to match the current implementation (v1.2.3). Defect post-mortems and change proposals live in [doc/bugfix/](doc/bugfix) and [doc/change/](doc/change).
 
+## Preview
+
+Session manager popup — pinned / non-pinned tabs, with the non-pinned list grouped by day (collapsible, latest day expanded by default):
+
+![Session manager popup — non-pinned tab](doc/images/popup-session-list-en.png)
+
+Pinned tab — pinned sessions listed on their own page, each row carrying a “pinned” badge:
+
+![Session manager popup — pinned tab](doc/images/popup-pinned-tab-en.png)
+
 ## Features
 
 ### Chrome Extension (manager)
@@ -38,7 +48,7 @@ A chat history management & offline viewing tool for DeepSeek Web (`chat.deepsee
 
 ```
 deepseek-chat-exporter/
-├── doc/                # Design document (SDD, in Chinese)
+├── doc/                # Design docs: spec / change / bugfix, images for screenshots
 ├── extension/          # Chrome extension
 │   ├── manifest.json   # MV3 manifest
 │   ├── build.js        # Build script (Vite for popup + esbuild for content/background)

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DeepSeek Chat Exporter",
-  "version": "1.0.16",
+  "version": "1.0.18",
   "description": "Export DeepSeek chat conversations to structured JSON",
   "permissions": [
     "activeTab",
