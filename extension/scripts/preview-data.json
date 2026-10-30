@@ -1,0 +1,15 @@
+{
+  "lang": "en",
+  "connected": true,
+  "deleteTemplateReady": true,
+  "currentSessionId": "today-1",
+  "sessions": [
+    { "id": "pinned-1", "title": "Pinned session A", "pinned": true, "updatedDaysAgo": 0 },
+    { "id": "pinned-2", "title": "Pinned session B", "pinned": true, "updatedDaysAgo": 1 },
+    { "id": "today-1", "title": "Today A", "updatedDaysAgo": 0 },
+    { "id": "today-2", "title": "Today B", "updatedDaysAgo": 0 },
+    { "id": "yesterday-1", "title": "Yesterday A", "updatedDaysAgo": 1 },
+    { "id": "days3-1", "title": "Three days ago", "updatedDaysAgo": 3 },
+    { "id": "days5-1", "title": "Five days ago", "updatedDaysAgo": 5 }
+  ]
+}

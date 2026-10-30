@@ -52,6 +52,7 @@ deepseek-chat-exporter/
 ├── extension/          # Chrome extension
 │   ├── manifest.json   # MV3 manifest
 │   ├── build.js        # Build script (Vite for popup + esbuild for content/background)
+│   ├── scripts/        # Dev tooling: preview.mjs (local popup preview) + preview-data.json
 │   ├── icons/
 │   └── src/
 │       ├── popup/      # UI shown when clicking the extension icon (plain / TSX)
@@ -87,6 +88,41 @@ cd extension
 pnpm install
 pnpm build
 ```
+
+### Local Preview (no extension install, no login)
+
+The popup depends on `chrome.*` APIs, so opening its HTML directly gives you a blank page. The
+repo ships a preview harness that fakes those APIs and serves the **real `dist/` output**:
+
+```bash
+cd extension
+pnpm build      # preview always serves a fresh build
+pnpm preview    # → http://127.0.0.1:8934/
+```
+
+Use it to check layout, group collapsing, tab switching and language switching, or to take
+README screenshots — no Chrome extension install and no DeepSeek login required.
+
+`scripts/preview.mjs` copies `dist/` to `.preview/` (git-ignored, rebuilt on every start),
+generates a `mock-chrome.js`, injects it *before* the popup bundle, and serves the directory
+over HTTP (`file://` would be blocked by CORS). The mock only fakes what the popup actually
+calls — `runtime.getManifest`, `runtime.sendMessage`, `runtime.onMessage`,
+`i18n.getUILanguage`, `storage.local` — so a newly added dependency on an undeclared API still
+fails loudly instead of being silently mocked. Export / delete actions are not simulated; they
+just log to the console.
+
+Mock data lives in [`extension/scripts/preview-data.json`](extension/scripts/preview-data.json):
+
+| Field | Meaning |
+|-------|---------|
+| `lang` | Initial UI language: `en` or `zh` |
+| `connected` | Whether the header shows "Connected" |
+| `deleteTemplateReady` | Whether the delete endpoint is reported as learned |
+| `currentSessionId` | Id of the session treated as currently open |
+| `sessions[]` | `id` / `title` / `pinned` / `updatedDaysAgo` |
+
+Sessions are described as "N days ago" rather than absolute timestamps, so the day-group headers
+stay correct over time. Edit the file and restart `pnpm preview` to take effect.
 
 ### Install
 

@@ -1,6 +1,6 @@
 # DeepSeek Chat 数据导出与展示工具 — 软件设计文档 (SDD)
 
-> 版本：1.2.3（2026-10-30 修订）
+> 版本：1.2.4（2026-10-30 修订）
 > 本文档由初版 SDD（Vue 3 方案）随实际实现修订而来，描述当前仓库的**真实架构**。
 > 与初版的主要差异：展示端与 Popup UI 统一改用 [plain-framework](https://benoly520.github.io/plain-framework/) 实现，
 > 导出端补充了鉴权代理、游标分页等落地决策，详见「修订记录」。
@@ -17,6 +17,7 @@
 | 1.2.1 | 2026-10-30 | 修复"刷新列表报未登录"缺陷：兜底会话列表请求由错误的 `POST /api/chat_session/fetch_page`（被 SPA 前端路由接住返回 HTML）改为 v0 真实协议 `GET /api/v0/chat_session/fetch_page`；新增从捕获 URL 自适应发现端点、业务错误码（HTTP 200 + `code≠0`）识别，以及"端点不存在"与"真未登录"的提示分流。同日 Chrome PC 登录态实测「刷新列表」恢复正常（缺陷根源与复盘见 `doc/bugfix/01.session-list-refresh-false-logout.bugfix.md`） |
 | 1.2.2 | 2026-10-30 | 会话列表区分置顶会话：条目渲染置顶徽标，列表按 `pinned` 稳定排序（置顶组在前，组内保持接口返回顺序）；`pinned` 由 v0 `fetch_page` 响应透传，缺失或非布尔按未置顶处理；版本 1.0.15（变更提案与验收记录见 `doc/change/01.pinned-sessions-display.change.md`） |
 | 1.2.3 | 2026-10-30 | 会话列表改为「置顶 / 非置顶」双标签页；非置顶页按本地自然日分组（今天 / 昨天 / MM-DD 周X / 日期未知），分组可点击收起展开，默认只展开最近一天；序号为当前标签页内的可见行号（跨分组连续）；全选作用域收窄到当前标签页；稳定排序随之移除；版本 1.0.16（详见 `doc/change/01.pinned-sessions-display.change.md` §2.4.2） |
+| 1.2.4 | 2026-10-30 | 新增 popup 本地预览工具（`pnpm preview`）：`scripts/preview.mjs` 将 `dist/` 复制到 `.preview/`、生成只覆盖 popup 实际调用接口的 mock chrome 并注入，再由 Node 内置 http 提供服务；预览数据外置为 `scripts/preview-data.json`，会话以「距今天数」描述。用于免装扩展、免登录地验证 UI 与交互，不替代真机验收（详见 §4.6） |
 
 ## 1. 项目概述
 
@@ -471,6 +472,33 @@ pnpm build → build.js
 ```
 
 加载目录为 `extension/dist`。
+
+### 4.6 本地预览与验证（mock chrome）
+
+popup 的数据全部经 `chrome.runtime.sendMessage` 获取，脱离扩展环境直接打开产物只会白屏，
+导致「改一行 UI 就得重装扩展 + 登录」的验证成本过高。为此仓库内置预览工具：
+
+```
+cd extension
+pnpm build && pnpm preview     # 默认 http://127.0.0.1:8934/
+```
+
+`scripts/preview.mjs` 的流程：
+
+1. 复制 `dist/` 到 `.preview/`（每次启动重建，避免残留旧产物造成「改了没生效」的错觉）
+2. 依 `scripts/preview-data.json` 生成 `.preview/mock-chrome.js`，**只**伪造 popup 实际调用的
+   `runtime.getManifest` / `runtime.sendMessage` / `runtime.onMessage` /
+   `i18n.getUILanguage` / `storage.local`，不额外放权——新增对未声明 API 的依赖仍会立刻报错，
+   而不是被 mock 掩盖
+3. 在 `popup.html` 的 module 脚本**之前**注入 mock，否则挂载时 `chrome` 尚不存在
+4. Node 内置 http 提供静态服务（`file://` 会被 CORS 拦住），根路径 302 到 popup 页面
+
+预览数据用「距今 N 天」（`updatedDaysAgo`）描述会话，日期分组表头不会随时间推移错位；
+`lang` 决定首屏语言，便于直接查看中 / 英两套界面。导出、删除类消息不做模拟，仅打日志。
+
+**边界**：该工具覆盖纯前端路径（渲染、分组折叠、标签页切换、语言切换、空态 / 错误态文案）。
+`chrome.*` 的真实行为——SW 生命周期与休眠、`storage` 持久化、content script 是否注入成功、
+真实登录态与限速——仍必须在 Chrome 中加载 `dist/` 验收。
 
 ---
 

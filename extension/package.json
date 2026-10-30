@@ -4,7 +4,8 @@
   "description": "Chrome Extension to export DeepSeek chat conversations as structured JSON",
   "type": "module",
   "scripts": {
-    "build": "node build.js"
+    "build": "node build.js",
+    "preview": "node scripts/preview.mjs"
   },
   "dependencies": {
     "plain": "link:../../plain-framework"

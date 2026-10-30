@@ -52,6 +52,7 @@ deepseek-chat-exporter/
 ├── extension/          # Chrome 扩展
 │   ├── manifest.json   # MV3 清单
 │   ├── build.js        # 构建脚本（Vite 构建 popup + esbuild 构建 content/background）
+│   ├── scripts/        # 开发工具：preview.mjs（popup 本地预览）+ preview-data.json
 │   ├── icons/
 │   └── src/
 │       ├── popup/      # 点击扩展图标弹出的 UI（plain / TSX）
@@ -86,6 +87,40 @@ cd extension
 pnpm install
 pnpm build
 ```
+
+### 本地预览（免装扩展、免登录）
+
+popup 依赖 `chrome.*` 接口，直接用浏览器打开它的 HTML 只会看到白屏。仓库内置一套预览工具，把
+这些接口换成假数据，**渲染的是 `dist/` 里的真实构建产物**：
+
+```bash
+cd extension
+pnpm build      # 预览始终基于最新构建产物
+pnpm preview    # → http://127.0.0.1:8934/
+```
+
+适合改完 UI 看效果、验证分组折叠 / 标签页切换 / 中英文切换，或为 README 截图——不用装扩展，
+也不用登录 DeepSeek。
+
+原理：`scripts/preview.mjs` 把 `dist/` 复制到 `.preview/`（已被 gitignore，每次启动重建），
+按配置生成 `mock-chrome.js` 并注入到 popup 脚本**之前**，最后用 Node 内置 http 起静态服务
+（走 `file://` 会被 CORS 拦住）。mock 只伪造 popup 真正调用的接口——`runtime.getManifest`、
+`runtime.sendMessage`、`runtime.onMessage`、`i18n.getUILanguage`、`storage.local`——
+因此新增了对未声明 API 的依赖时仍会直接报错，而不是被 mock 悄悄掩盖。导出 / 删除类操作不做模拟，
+只在控制台打日志。
+
+预览数据在 [`extension/scripts/preview-data.json`](extension/scripts/preview-data.json)：
+
+| 字段 | 含义 |
+|------|------|
+| `lang` | 初始界面语言：`en` 或 `zh` |
+| `connected` | 是否正确显示「已连接」 |
+| `deleteTemplateReady` | 删除接口是否显示为已学习 |
+| `currentSessionId` | 被视为当前打开的会话 id |
+| `sessions[]` | `id` / `title` / `pinned` / `updatedDaysAgo` |
+
+会话用「距今几天」（`updatedDaysAgo`）描述而非绝对时间戳，日期分组表头不会随时间推移而错位。
+改完配置重启 `pnpm preview` 生效。
 
 ### 安装
 
