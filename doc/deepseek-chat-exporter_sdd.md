@@ -1,6 +1,6 @@
 # DeepSeek Chat 数据导出与展示工具 — 软件设计文档 (SDD)
 
-> 版本：1.2.0（2026-10-20 修订）
+> 版本：1.2.1（2026-10-30 修订）
 > 本文档由初版 SDD（Vue 3 方案）随实际实现修订而来，描述当前仓库的**真实架构**。
 > 与初版的主要差异：展示端与 Popup UI 统一改用 [plain-framework](https://benoly520.github.io/plain-framework/) 实现，
 > 导出端补充了鉴权代理、游标分页等落地决策，详见「修订记录」。
@@ -14,6 +14,7 @@
 | 1.1.1 | 2026-10-20 | 会话 URL 实际形如 /a/chat/s/{uuid}（含 /s/ 段），修正 page-watcher 正则；API 匹配改为路径后缀式（兼容 /api/v0/... 版本前缀）；新增 XHR 拦截兜底；popup 增加「API 捕获诊断」区块 |
 | 1.1.2 | 2026-10-20 | manifest icons 由 SVG 改为 PNG（Chromium 不支持 SVG 图标，显示为字母占位符）；新增运行日志系统（content/SW 日志汇总持久化，popup 支持拉取 / 下载 / 拷贝 / 清空） |
 | 1.2.0 | 2026-10-20 | Popup 重构为会话管理器（自动加载全部列表 / 编号+日期 / 全选 / 导出选中 / 批量删除）；导出全部突破 100 条限制（keyset 翻页 lte_cursor.updated_at）；新增学习式批量删除（捕获真实删除请求作模板，深度替换 UUID 重放）；GET_STATUS 由 SW 合并权威导出状态（修复进度被轮询覆盖）；消息正文多级提取（v0 片段结构）；日志头带版本号；统一可折叠面板与自定义展开箭头 / 确认弹窗；未登录友好提示 |
+| 1.2.1 | 2026-10-30 | 修复"刷新列表报未登录"缺陷：兜底会话列表请求由错误的 `POST /api/chat_session/fetch_page`（被 SPA 前端路由接住返回 HTML）改为 v0 真实协议 `GET /api/v0/chat_session/fetch_page`；新增从捕获 URL 自适应发现端点、业务错误码（HTTP 200 + `code≠0`）识别，以及"端点不存在"与"真未登录"的提示分流 |
 
 ## 1. 项目概述
 
@@ -111,8 +112,12 @@ JSON File (.json)
 | 端点 | 方法 | 用途 |
 |------|------|------|
 | `/api/users/current` | GET | 获取当前登录用户信息 |
-| `/api/chat_session/fetch_page` | POST | 分页获取会话列表（keyset cursor 翻页） |
-| `/api/chat/history_messages` | POST | 获取指定会话的历史消息 |
+| `/api/v0/chat_session/fetch_page` | GET | 分页获取会话列表（keyset cursor 翻页） |
+| `/api/v0/chat/history_messages` | GET | 获取指定会话的历史消息 |
+
+> **路径必须带 `/v0/` 版本段**：去掉版本前缀的路径（如 `/api/chat_session/fetch_page`）
+> 不存在于后端，会被 SPA 前端路由兜底接住，返回 **HTTP 200 + `text/html`（index.html）**，
+> 表现形似"登录失效"。核对方式：`curl -i` 看 `content-type` 是否为 `application/json`。
 
 ### 3.2 认证机制
 
@@ -124,17 +129,16 @@ JSON File (.json)
 **请求：**
 
 ```http
-POST /api/chat_session/fetch_page
-Content-Type: application/json
+GET /api/v0/chat_session/fetch_page?count=100&lte_cursor.pinned=false
 Authorization: Bearer <token>
-
-{
-  "cursor": "",           // 分页游标，首次为空
-  "limit": 50,            // 每页数量（扩展端实现值）
-  "order_by": "updated_at",
-  "direction": "DESC"
-}
 ```
+
+页面侧的真实调用（逆向自 `main.*.js`）为 `http.get('/api/v0/chat_session/fetch_page', { query })`，
+query 依翻页方向取 `lte_cursor.*` 或 `gte_cursor.*`，游标由 `{pinned, updatedAt}` 二元组构成：
+
+- **首页**：游标值为 `null`，序列化时省略 `lte_cursor.updated_at`，仅带 `lte_cursor.pinned=false`；
+  `count` 缺省则用服务端默认页大小。
+- **翻页**：追加 `lte_cursor.updated_at=<上一页末条 updated_at>`，并同步 `lte_cursor.pinned=<末条 pinned>`。
 
 **响应结构：**
 
@@ -152,6 +156,10 @@ Authorization: Bearer <token>
 > **翻页要点**：v0 响应实际**没有** `next_cursor` 字段，页面自身翻页用的是 keyset 游标——
 > 在 query 上追加 `lte_cursor.updated_at=<上一页末条 updated_at>`。
 > 扩展复刻该方式实现真实翻页（突破单页数量限制），时间字段为秒级数字时间戳。
+>
+> **错误包络**：业务错误同样返回 HTTP 200，形如 `{"code":40003,"msg":"INVALID_TOKEN","data":null}`。
+> 代理层需在 JSON 解析后识别 `code≠0 && msg && data` 的包络特征并转成明确提示，
+> 否则会落到"响应结构无法解析"这类晦涩分支。
 
 ### 3.4 删除会话 API（学习式捕获）
 
@@ -163,11 +171,8 @@ Authorization: Bearer <token>
 **请求：**
 
 ```http
-POST /api/chat/history_messages
-Content-Type: application/json
+GET /api/v0/chat/history_messages?chat_session_id=<uuid>
 Authorization: Bearer <token>
-
-{ "session_id": "session_id" }
 ```
 
 **响应结构：**
@@ -233,7 +238,7 @@ extension/
 - 以**经典脚本**（IIFE）注入页面 MAIN world（`content/fetch-hook.js`，与 manifest 的
   `web_accessible_resources` 声明一致），覆盖 `window.fetch`。
 - `document_start` 时**立即注入**，确保 hook 赶在页面首批 API 请求之前安装。
-- 拦截目标：`/api/chat_session/fetch_page`、`/api/chat/history_messages`、
+- 拦截目标：`/api/v0/chat_session/fetch_page`、`/api/v0/chat/history_messages`、
   `Accept: text/event-stream` 的 SSE 请求（兼容 `Request` 对象与 `init.headers` 两种形态）。
 - 同时捕获 `Authorization` 头，经 `__ds_data__` 事件（`auth_token`）上报给 content script。
 - **API 请求捕获分类**（`api_request` 事件，含完整 method/url/body）：
@@ -246,7 +251,14 @@ extension/
 - 会话列表**按 id 合并累积**（fetch_page 是分页接口，跨页不丢失）。
 - 提供 **FETCH_PROXY**：service worker 无法携带页面的 Bearer Token，
   由 content script 在页面上下文代为发起 API 请求（附带捕获的 Token + `credentials: 'include'`）。
-  响应非 JSON 且（Token 缺失或页面特征命中）时判定为**未登录**，返回明确的登录提示而非晦涩错误。
+  响应异常按成因分流，避免误导：
+  ① 401/403 或**无 Token** 且返回 HTML → "未登录或登录已过期"；
+  ② **已有 Token** 却拿到 SPA 文档（`<!doctype html>`）→ "API 端点不存在，接口路径可能已变更"；
+  ③ JSON 中 `code≠0` 的错误包络 → 认证类转登录提示，其余带 code/msg 原样上抛。
+- **列表端点自愈**：页面列表组件挂载时会主动请求 `fetch_page`（`useLayoutEffect` → `fetchSessions`），
+  但 hook 是异步注入的，存在“请求早于 hook 安装”的竞态（侧栏未挂载时也不会请求）。
+  捕获缺失时，content 侧退回扫描已捕获的 `/api/` URL 列表发现该端点并按 v0 协议拼兜底请求，
+  确保 SW 拿到的永远是 JSON 而不是前端路由的 HTML。
 - 捕获/上报类消息发送失败时静默处理（扩展重载、通道关闭等场景）。
 
 #### 4.2.3 Page Watcher（`page-watcher.ts`）

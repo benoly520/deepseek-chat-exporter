@@ -6,6 +6,7 @@
 
 import { startPageWatcher } from './page-watcher';
 import { createLocalLogger } from '../utils/logger';
+import { describeError } from '../utils/error';
 import { extractMessages, extractSessions } from '../utils/api-extract';
 import type {
   ExtensionMessage,
@@ -18,6 +19,9 @@ import type {
 
 // 日志器：本地记录 + 转发 SW 汇总
 const logger = createLocalLogger('content', true);
+
+// DeepSeek 站点基地址：hook 捕获的相对路径按此解析
+const API_BASE = 'https://chat.deepseek.com';
 
 // 状态
 let currentSessionId: string | null = null;
@@ -349,35 +353,116 @@ async function proxyFetch(payload: FetchProxyPayload): Promise<unknown> {
     logger.error('Proxy fetch 返回非 JSON 响应', {
       url: payload.url,
       contentType,
+      hasToken: Boolean(authToken),
       bodySnippet: text.slice(0, 500),
     });
-    // API 返回 HTML：结合 token 缺失或页面特征判断为未登录（被重定向到登录页）
-    if (!authToken || /<html|login/i.test(text.slice(0, 1000))) {
+    // 已有 token 却拿到 SPA 文档：URL 命中的是前端路由兜底页（API 路径不存在），
+    // 与登录态无关，必须报成端点问题，否则会误导用户去重新登录。
+    if (authToken && /^\s*<(!doctype|html)/i.test(text)) {
+      throw new Error(
+        `API 端点不存在（${payload.url} 返回了页面 HTML 而非 JSON），` +
+          '可能是 DeepSeek 接口路径已变更，请把弹窗里的运行日志反馈给扩展作者'
+      );
+    }
+    // 无 token 且返回 HTML：大概率未登录（被重定向到登录页）
+    if (!authToken) {
       throw new Error('未登录或登录已过期，请先登录 chat.deepseek.com 后重试');
     }
     throw new Error(`响应非 JSON（content-type: ${contentType}），URL 可能不正确`);
   }
 
+  let json: unknown;
   try {
-    const json = await response.json();
-    logger.debug('Proxy fetch ok', payload.url);
-    return json;
+    json = await response.json();
   } catch (error) {
-    const text = await response.text().catch(() => '(unavailable)');
+    // content-type 已是 JSON 但正文解析失败（如截断 / 空体）
     logger.error('Proxy fetch JSON 解析失败', {
       url: payload.url,
       error: String(error),
-      bodySnippet: text.slice(0, 500),
     });
     throw error;
   }
+
+  // v0 API 的业务错误也返回 HTTP 200（如 {"code":40003,"msg":"INVALID_TOKEN"}），
+  // 必须在这里识别，否则会被当成“响应结构不符”误导排查
+  assertBusinessOk(json, payload.url);
+  logger.debug('Proxy fetch ok', payload.url);
+  return json;
 }
 
 /**
- * 从捕获的请求配置中找出指定类型的最新一条。
+ * 识别业务层错误码。v0 API 的错误包络形如 {code:40003,msg:"INVALID_TOKEN",data:null}，
+ * 且 HTTP 状态仍为 200；只在同时具备 msg / data:null 特征时判定为错误，
+ * 避免误把业务对象里的 code 字段当成错误码。
+ * 认证类错误（未登录 / token 失效）转成可直接操作的提示。
+ */
+function assertBusinessOk(json: unknown, url: string): void {
+  const envelope = json as { code?: unknown; msg?: unknown; data?: unknown } | null;
+  if (typeof envelope !== 'object' || envelope === null) return;
+
+  const code = Number(envelope.code);
+  const hasMsg = typeof envelope.msg === 'string' && envelope.msg;
+  const isEnvelopeShape = 'data' in envelope && 'msg' in envelope;
+  if (!Number.isFinite(code) || code === 0 || !hasMsg || !isEnvelopeShape) {
+    return; // 非错误包络，视为成功响应
+  }
+
+  const msg = String(envelope.msg);
+  logger.error('Proxy fetch 业务错误', { url, code, msg });
+  if (/token|unauth|login|auth/i.test(msg)) {
+    throw new Error('未登录或登录已过期，请先登录 chat.deepseek.com 后重试');
+  }
+  throw new Error(`API 业务错误（code=${code}, msg=${msg}）`);
+}
+
+/**
+ * 会话列表端点特征（与 fetch-hook 一致的"路径后缀"匹配，兼容任意版本前缀）。
+ */
+const FETCH_PAGE_MARK = 'chat_session/fetch_page';
+
+/**
+ * 构造兜底的 fetch_page 请求配置。
+ * 页面侧列表组件挂载时必然请求一次 fetch_page，但 hook 是异步注入的，
+ * 存在“请求早于 hook 安装”的竞态（侧栏未挂载时也不会请求），此时拿不到真实配置。
+ * 这里按 v0 协议拼一条等价请求：
+ * - GET + query 参数（页面侧真实调用就是 http.get，与它保持一致）；
+ * - 首页不传 lte_cursor.updated_at（页面初始游标值为 null，序列化时省略）；
+ * - count 缺省交给服务端默认页大小（捕获到的 URL 若带 count 会原样保留）。
+ */
+function buildFetchPageFallback(url: string): CapturedApiRequest {
+  let pathname = url;
+  let search = '';
+  try {
+    const u = new URL(url, API_BASE);
+    pathname = u.pathname;
+    // 剔除游标类参数，保留其余（如 count），由 SW 翻页时重新注入游标
+    const params = new URLSearchParams(u.search);
+    for (const key of Array.from(params.keys())) {
+      if (key.includes('cursor')) params.delete(key);
+    }
+    search = params.toString() ? `?${params.toString()}` : '';
+  } catch {
+    pathname = url.split('?')[0];
+  }
+  return { kind: 'fetchPage', url: `${pathname}${search}`, method: 'GET' };
+}
+
+/**
+ * 在捕获的请求配置中找出指定类型的最新一条。
+ * fetch_page 缺失时，退回从已捕获的 /api/ URL 里自适应发现该端点
+ * （端点路径若再变更，只要页面发起过一次请求即可自愈）。
  */
 function findRequest(kind: 'fetchPage' | 'history'): CapturedApiRequest | undefined {
-  return capturedRequests.find((r) => r.kind === kind);
+  const captured = capturedRequests.find((r) => r.kind === kind);
+  if (captured || kind !== 'fetchPage') {
+    return captured;
+  }
+  const hit = recentApiUrls.find((u) => u.includes(FETCH_PAGE_MARK));
+  if (hit) {
+    logger.info('从捕获 URL 中发现 fetch_page 端点（请求配置未捕获，使用兜底）', hit);
+    return buildFetchPageFallback(hit);
+  }
+  return undefined;
 }
 
 /**
@@ -446,7 +531,7 @@ function handleMessage(message: ExtensionMessage, sendResponse: (response?: any)
   } else if (message.type === 'FETCH_PROXY') {
     proxyFetch(message.payload as FetchProxyPayload)
       .then((data) => sendResponse({ data }))
-      .catch((error) => sendResponse({ error: String(error) }));
+      .catch((error) => sendResponse({ error: describeError(error) }));
     // 异步响应，保持通道打开
   } else if (message.type === 'DOWNLOAD_BLOB') {
     const { filename, json } = message.payload as { filename: string; json: string };
@@ -454,8 +539,8 @@ function handleMessage(message: ExtensionMessage, sendResponse: (response?: any)
       downloadBlob(filename, json);
       sendResponse({ success: true });
     } catch (error) {
-      logger.error('Blob download failed', String(error));
-      sendResponse({ error: String(error) });
+      logger.error('Blob download failed', describeError(error));
+      sendResponse({ error: describeError(error) });
     }
   }
 }

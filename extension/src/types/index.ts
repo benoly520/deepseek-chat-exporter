@@ -56,6 +56,8 @@ export interface SessionSummary {
   /** v0 API 返回秒级数字时间戳，旧结构可能为 ISO 字符串，展示层负责归一化 */
   created_at?: string | number;
   updated_at?: string | number;
+  /** 是否置顶：keyset 翻页游标由 {pinned, updated_at} 二元组构成 */
+  pinned?: boolean;
 }
 
 export interface HistoryMessagesResponse {

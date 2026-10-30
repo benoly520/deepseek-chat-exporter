@@ -20,6 +20,7 @@ import { triggerDownload, generateFilename } from '../utils/downloader';
 import { createLocalLogger } from '../utils/logger';
 import { LogStore } from '../utils/log-store';
 import { extractMessages, extractSessions } from '../utils/api-extract';
+import { describeError } from '../utils/error';
 import type { LogEntry } from '../utils/logger';
 
 // 日志：SW 自身日志通过 sink 直写 logStore，同样持久化、可被 popup 拉取
@@ -64,6 +65,8 @@ chrome.storage.local
 
 /** DeepSeek API 基地址 */
 const API_BASE = 'https://chat.deepseek.com';
+/** 会话列表端点（v0 协议：GET + query 游标参数） */
+const FETCH_PAGE_PATH = '/api/v0/chat_session/fetch_page';
 /** 会话列表每页数量 */
 const SESSION_PAGE_SIZE = 50;
 
@@ -86,13 +89,13 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
         // 合并 popup 本地日志（如日志器自带 entries）不在此处理，仅返回汇总日志
         sendResponse({ entries });
       })
-      .catch((error) => sendResponse({ error: String(error) }));
+      .catch((error) => sendResponse({ error: describeError(error) }));
     return true;
   } else if (message.type === 'CLEAR_LOGS') {
     logStore
       .clear()
       .then(() => sendResponse({ success: true }))
-      .catch((error) => sendResponse({ error: String(error) }));
+      .catch((error) => sendResponse({ error: describeError(error) }));
     return true;
   } else if (message.type === 'GET_STATUS') {
     getStatus(sendResponse);
@@ -121,7 +124,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
     deleteTemplate = req;
     chrome.storage.local
       .set({ [DELETE_TEMPLATE_KEY]: req })
-      .catch((error) => logger.error('Failed to persist delete template', String(error)));
+      .catch((error) => logger.error('Failed to persist delete template', describeError(error)));
     logger.info('Delete template learned', { url: req.url, method: req.method });
     sendResponse({ success: true });
   } else if (
@@ -147,7 +150,7 @@ async function getActiveDeepSeekTabId(): Promise<number | null> {
     const tab = tabs.find((t) => t.url?.includes('chat.deepseek.com'));
     return tab?.id ?? null;
   } catch (error) {
-    logger.error('Failed to query tabs', String(error));
+    logger.error('Failed to query tabs', describeError(error));
     return null;
   }
 }
@@ -192,10 +195,10 @@ async function getStatus(sendResponse: (response: StatusPayload) => void) {
     }
   } catch (error) {
     // content script 未注入（页面尚未刷新过）等场景
-    logger.warn('GET_STATUS: content script unreachable', String(error));
+    logger.warn('GET_STATUS: content script unreachable', describeError(error));
     sendResponse({
       ...idleStatus,
-      swError: `content script 不可达: ${String(error)}`,
+      swError: `content script 不可达: ${describeError(error)}`,
       deleteTemplateReady: Boolean(deleteTemplate),
       sessionCacheCount: sessionCache.length,
     });
@@ -245,8 +248,8 @@ async function loadAllSessions(sendResponse: (response: any) => void) {
     sessionCacheTime = Date.now();
     sendResponse({ sessions: sessionCache });
   } catch (error) {
-    logger.error('loadAllSessions failed', String(error));
-    sendResponse({ error: String(error) });
+    logger.error('loadAllSessions failed', describeError(error));
+    sendResponse({ error: describeError(error) });
   }
 }
 
@@ -277,7 +280,8 @@ async function proxyRequest<T>(tabId: number, req: CapturedApiRequest): Promise<
 
   if (result?.error) {
     logger.error('Proxy request returned error', { url: req.url, method: req.method, error: result.error });
-    throw new Error(result.error);
+    // content 侧已给出可读文本，不再 new Error 包装（避免多一层 "Error: " 前缀）
+    throw new Error(result.error.replace(/^Error:\s*/, ''));
   }
   return result.data as T;
 }
@@ -285,13 +289,14 @@ async function proxyRequest<T>(tabId: number, req: CapturedApiRequest): Promise<
 /**
  * 游标分页拉取全部会话列表。
  *
- * 代理策略：原样重放页面实际发出的请求（method/url/body 一致，避免 405）。
+ * 代理策略：优先原样重放页面实际发出的请求（method/url/body 一致，避免 405）。
+ * 页面未捕获到该请求时（hook 注入竞态 / 侧栏未挂载）退回 v0 协议拼接的等价请求。
  * v0 API 响应无 next_cursor 游标字段，但页面自身的翻页方式是 keyset 游标：
  * 在 query 上追加 lte_cursor.updated_at=<上一页最后一条会话的 updated_at>，
  * 这里复刻该方式实现真实翻页。
  *
  * @param tabId 目标标签页
- * @param fetchPageRequest 页面实际请求配置（缺省时回退硬编码 POST）
+ * @param fetchPageRequest 页面实际请求配置（缺省时按 v0 协议构造 GET 请求）
  */
 async function fetchAllSessions(
   tabId: number,
@@ -300,23 +305,26 @@ async function fetchAllSessions(
   const sessions: SessionSummary[] = [];
   const seen = new Set<string>();
   let page = 0;
+  let attempted = 0; // 实际发出的请求数（仅用于日志，break 退出时不会多计）
   const MAX_PAGES = 200; // 防御性上限，避免异常响应导致死循环
 
-  // 请求配置：优先重放页面真实请求
+  // 请求配置：优先重放页面真实请求；
+  // 兜底必须是 v0 协议（GET + query），旧版硬编码的 POST /api/chat_session/fetch_page
+  // 会被 SPA 前端路由接住返回 HTML，表现为“假未登录”
   let req: CapturedApiRequest = fetchPageRequest || {
     kind: 'fetchPage',
-    url: `${API_BASE}/api/chat_session/fetch_page`,
-    method: 'POST',
-    body: JSON.stringify({ cursor: '', limit: SESSION_PAGE_SIZE, order_by: 'updated_at', direction: 'DESC' }),
+    url: `${FETCH_PAGE_PATH}?lte_cursor.pinned=false&count=${SESSION_PAGE_SIZE}`,
+    method: 'GET',
   };
   logger.info('fetchAllSessions start', { url: req.url, method: req.method });
 
   while (page < MAX_PAGES) {
     let data: SessionListResponse;
+    attempted++;
     try {
       data = await proxyRequest<SessionListResponse>(tabId, req);
     } catch (error) {
-      logger.error('fetchAllSessions page failed', { page, url: req.url, error: String(error) });
+      logger.error('fetchAllSessions page failed', { page, url: req.url, error: describeError(error) });
       throw error;
     }
 
@@ -358,7 +366,7 @@ async function fetchAllSessions(
       break;
     }
 
-    // keyset 翻页：用本页最后一条会话的 updated_at 作为 lte_cursor.updated_at
+    // keyset 翻页：用本页最后一条会话的 updated_at / pinned 作为 lte_cursor
     // （DeepSeek 页面滚动加载下一页时正是这种请求形式）
     const last = pageSessions[pageSessions.length - 1] as unknown as Record<string, unknown>;
     const lastUpdated = last?.updated_at;
@@ -371,7 +379,11 @@ async function fetchAllSessions(
 
     req = {
       ...req,
-      url: upsertQueryParam(req.url, 'lte_cursor.updated_at', String(lastUpdated)),
+      url: upsertQueryParam(
+        upsertQueryParam(req.url, 'lte_cursor.updated_at', String(lastUpdated)),
+        'lte_cursor.pinned',
+        String(Boolean(last?.pinned))
+      ),
     };
     page++;
 
@@ -379,7 +391,7 @@ async function fetchAllSessions(
     await sleep(300);
   }
 
-  logger.info('fetchAllSessions finished', { total: sessions.length, pages: page + 1 });
+  logger.info('fetchAllSessions finished', { total: sessions.length, pages: attempted });
   return sessions;
 }
 
@@ -458,7 +470,7 @@ async function fetchHistoryMessages(
     logger.debug('fetchHistoryMessages done', { sessionId, count: messages.length });
     return messages;
   } catch (error) {
-    logger.error('fetchHistoryMessages failed', { sessionId, url: req.url, error: String(error) });
+    logger.error('fetchHistoryMessages failed', { sessionId, url: req.url, error: describeError(error) });
     return null;
   }
 }
@@ -515,7 +527,7 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
         title: sessionInfo?.title || '',
       });
     } catch (error) {
-      logger.error('exportCurrent fetch session info failed', String(error));
+      logger.error('exportCurrent fetch session info failed', describeError(error));
     }
 
     const conversation = buildConversation(
@@ -540,8 +552,8 @@ async function exportCurrentConversation(sendResponse: (response: any) => void) 
     exportInProgress = false;
     exportProgress = 0;
     exportCurrent = null;
-    logger.error('exportCurrent failed', String(error));
-    sendResponse({ error: String(error) });
+    logger.error('exportCurrent failed', describeError(error));
+    sendResponse({ error: describeError(error) });
   }
 }
 
@@ -647,7 +659,7 @@ async function exportSelectedConversations(
         }
       } catch (error) {
         failed.push(session.id);
-        logger.error('exportSelected session failed', { i, id: session.id, error: String(error) });
+        logger.error('exportSelected session failed', { i, id: session.id, error: describeError(error) });
         // 单个会话失败不中断整体导出
       }
     }
@@ -674,8 +686,8 @@ async function exportSelectedConversations(
     exportInProgress = false;
     exportProgress = 0;
     exportCurrent = null;
-    logger.error('exportSelected failed', String(error));
-    sendResponse({ error: String(error) });
+    logger.error('exportSelected failed', describeError(error));
+    sendResponse({ error: describeError(error) });
   }
 }
 
@@ -732,7 +744,7 @@ async function deleteSessions(sessionIds: string[], sendResponse: (response: any
         logger.info('deleteSessions deleted', { i, id });
       } catch (error) {
         failed.push(id);
-        logger.error('deleteSessions failed', { i, id, error: String(error) });
+        logger.error('deleteSessions failed', { i, id, error: describeError(error) });
         // 单个失败不中断
       }
 
@@ -769,8 +781,8 @@ async function deleteSessions(sessionIds: string[], sendResponse: (response: any
     exportInProgress = false;
     exportProgress = 0;
     exportCurrent = null;
-    logger.error('deleteSessions failed', String(error));
-    sendResponse({ error: String(error) });
+    logger.error('deleteSessions failed', describeError(error));
+    sendResponse({ error: describeError(error) });
   }
 }
 
@@ -787,7 +799,7 @@ function buildDeleteRequest(
       const replaced = replaceUuids(JSON.parse(body), sessionIds);
       body = JSON.stringify(replaced);
     } catch (error) {
-      logger.error('删除模板 body 解析失败', String(error));
+      logger.error('删除模板 body 解析失败', describeError(error));
     }
   }
   return { kind: 'delete', url: template.url, method: template.method, body };

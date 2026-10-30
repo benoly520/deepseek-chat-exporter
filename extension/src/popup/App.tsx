@@ -6,6 +6,7 @@
 import { signal, computed, resolve } from 'plain';
 import type { StatusPayload, ExtensionMessage, SessionSummary } from '../types';
 import { formatAll } from '../utils/logger';
+import { describeError } from '../utils/error';
 import type { LogEntry } from '../utils/logger';
 
 // --- 状态 ---
@@ -161,7 +162,7 @@ async function loadList(force = false) {
     selected.set(new Set(list.map((s) => s.id)));
     showMessage(`已加载 ${list.length} 个会话`, false);
   } catch (error) {
-    showMessage(`加载会话列表失败: ${String(error)}`, true);
+    showMessage(`加载会话列表失败: ${describeError(error)}`, true);
   } finally {
     listLoading.set(false);
   }
@@ -210,7 +211,7 @@ async function exportCurrent() {
       showMessage(`导出成功: ${response.filename}`, false);
     }
   } catch (error) {
-    showMessage(`导出失败: ${String(error)}`, true);
+    showMessage(`导出失败: ${describeError(error)}`, true);
   } finally {
     const s = status.peek();
     status.set({ ...s, exporting: false, exportProgress: 0, exportCurrent: null });
@@ -243,7 +244,7 @@ async function exportSelected() {
       showMessage(`导出成功: ${response.filename} (${response.count} 个会话)`, false);
     }
   } catch (error) {
-    showMessage(`导出失败: ${String(error)}`, true);
+    showMessage(`导出失败: ${describeError(error)}`, true);
   } finally {
     const s = status.peek();
     status.set({ ...s, exporting: false, exportProgress: 0, exportCurrent: null });
@@ -294,7 +295,7 @@ async function deleteSelected() {
       selected.set(new Set());
     }
   } catch (error) {
-    showMessage(`删除失败: ${String(error)}`, true);
+    showMessage(`删除失败: ${describeError(error)}`, true);
   } finally {
     const s = status.peek();
     status.set({ ...s, exporting: false, exportProgress: 0, exportCurrent: null });
