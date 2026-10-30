@@ -9,7 +9,7 @@ A chat history management & offline viewing tool for DeepSeek Web (`chat.deepsee
 | Chrome Extension (manager) | `extension/` | Manifest V3 + TypeScript + [plain-framework](https://benoly520.github.io/plain-framework/) + esbuild | Session manager: browse / batch-export / batch-delete chats, export to structured JSON | **[⬇ Latest build zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)** |
 | Viewer (presentation) | `viewer/` | [plain-framework](https://benoly520.github.io/plain-framework/) + markdown-it + highlight.js | Offline viewer: import exported JSON, browse as chat bubbles | — |
 
-> See the Software Design Document (SDD, in Chinese) at [doc/spec/deepseek-chat-exporter_sdd.spec.md](doc/spec/deepseek-chat-exporter_sdd.spec.md), revised to match the current implementation (v1.2.3). Defect post-mortems and change proposals live in [doc/bugfix/](doc/bugfix) and [doc/change/](doc/change).
+> See the Software Design Document (SDD, in Chinese) at [doc/spec/deepseek-chat-exporter_sdd.spec.md](doc/spec/deepseek-chat-exporter_sdd.spec.md), revised to match the current implementation (v1.2.5). Defect post-mortems and change proposals live in [doc/bugfix/](doc/bugfix) and [doc/change/](doc/change).
 
 ## Preview
 
@@ -25,7 +25,10 @@ Pinned tab — pinned sessions listed on their own page, each row carrying a “
 
 ### Chrome Extension (manager)
 
-- **Session manager**: opening the popup automatically loads the **full** session list with pagination (keyset paging — not limited by per-page size), each row shows index / title / date; select all or individual
+- **Session manager**: opening the popup automatically loads the **full** session list with pagination (keyset paging — not limited by per-page size); each row shows index / title / date; select all (current tab only) or individual
+- **Pinned / others tabs**: pinned sessions get their own tab and a "pinned" badge; everything else lives on the others tab
+- **Day grouping**: the others tab groups sessions by local calendar day (Today / Yesterday / MM-DD + weekday / unknown date). The latest day is expanded by default, every group header is clickable to collapse or expand, and each shows its row count. Row numbers stay continuous across groups within the current tab
+- **Bilingual UI**: an `EN` / `ZH` button in the header switches the popup language at runtime — no reload, the choice is persisted, and messages already on screen get re-translated
 - **Export current session**: export the conversation you are viewing
 - **Batch export selected**: merge checked sessions into a single JSON, with live progress (N/total + title + percentage)
 - **Batch delete sessions**: learned delete endpoint (manually delete any session once on the page and the extension "learns" it), custom confirmation dialog, rate-limited one-by-one replay
@@ -65,9 +68,10 @@ deepseek-chat-exporter/
 └── viewer/             # Viewer (plain-framework)
     ├── index.html
     └── src/
-        ├── components/ # FileLoader / ConversationList / ChatView
+        ├── components/ # FileLoader / ConversationList / ChatView / LangSwitch
         ├── utils/      # json-parser / date-format / markdown
         ├── state.ts    # module-level signal state
+        ├── i18n.ts     # zh / en dictionaries + language signal
         └── App.tsx
 ```
 
@@ -137,9 +141,11 @@ stay correct over time. Edit the file and restart `pnpm preview` to take effect.
 1. Open [chat.deepseek.com](https://chat.deepseek.com) and log in (if the extension was installed after the page, refresh the page once)
 2. Click the extension icon — the popup is the session manager:
    - Automatically loads the **full** session list with pagination (keyset paging, not limited by per-page size); each row shows index / title / date
+   - **Pinned / Others tabs**: pinned sessions are listed separately; the Others tab groups the rest by day (Today / Yesterday / …) — click a group header to collapse or expand it
    - **Export current session**: export the conversation you are viewing
    - **Export selected**: all selected by default; checked sessions are merged into a single JSON (throttled: pauses 800ms every 5 requests, live progress)
    - **Delete selected**: batch delete (learned, see below); requires a custom confirmation dialog — irreversible
+   - **Language**: the `EN` / `ZH` button in the top-right switches the interface language; the choice is remembered
 
 ### Batch Delete (learned)
 

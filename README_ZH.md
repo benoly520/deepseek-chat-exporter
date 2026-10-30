@@ -9,7 +9,7 @@ DeepSeek 网页版（chat.deepseek.com）聊天记录管理与离线查看工具
 | Chrome 扩展（管理端） | `extension/` | Manifest V3 + TypeScript + [plain-framework](https://benoly520.github.io/plain-framework/) + esbuild | 会话管理器：浏览 / 批量导出 / 批量删除聊天记录，导出为结构化 JSON | **[⬇ 最新构建 zip](https://github.com/benoly520/deepseek-chat-exporter/raw/main/extension/deepseek-chat-exporter-extension.zip)** |
 | 查看器（展示端） | `viewer/` | [plain-framework](https://benoly520.github.io/plain-framework/) + markdown-it + highlight.js | 离线查看器：导入导出的 JSON，以气泡对话形式离线浏览 | — |
 
-> 软件设计文档（SDD）见 [doc/spec/deepseek-chat-exporter_sdd.spec.md](doc/spec/deepseek-chat-exporter_sdd.spec.md)，已随当前实现修订（v1.2.3）。缺陷复盘与变更提案分别见 [doc/bugfix/](doc/bugfix) 与 [doc/change/](doc/change)。
+> 软件设计文档（SDD）见 [doc/spec/deepseek-chat-exporter_sdd.spec.md](doc/spec/deepseek-chat-exporter_sdd.spec.md)，已随当前实现修订（v1.2.5）。缺陷复盘与变更提案分别见 [doc/bugfix/](doc/bugfix) 与 [doc/change/](doc/change)。
 
 ## 界面预览
 
@@ -25,7 +25,10 @@ DeepSeek 网页版（chat.deepseek.com）聊天记录管理与离线查看工具
 
 ### Chrome 扩展（导出端）
 
-- **会话管理器**：打开 popup 自动分页加载**全部**会话列表（keyset 翻页，不受单页数量限制），每行显示编号 / 标题 / 日期，支持全选 / 单选
+- **会话管理器**：打开 popup 自动分页加载**全部**会话列表（keyset 翻页，不受单页数量限制），每行显示编号 / 标题 / 日期，支持全选（仅当前标签页）/ 单选
+- **置顶 / 非置顶双标签页**：置顶会话单独一页并带「置顶」徽标，其余会话在非置顶页
+- **日期分组**：非置顶页按本地自然日分组（今天 / 昨天 / MM-DD 周X / 日期未知），默认只展开最近一天，点击组头可收起展开，每组右侧显示条数；编号在当前标签页内跨分组连续
+- **中英文界面切换**：标题栏 `EN` / `ZH` 按钮运行时切换 popup 语言，无需刷新，选择持久化；已显示的提示也会重新翻译
 - **导出当前会话**：导出正在浏览的对话
 - **批量导出选中**：勾选的会话合并导出为一个 JSON，实时进度（N/总数 + 标题 + 百分比）
 - **批量删除会话**：学习式捕获删除接口（页面手动删除一次即学会），自定义弹窗二次确认，限速逐个重放
@@ -64,9 +67,10 @@ deepseek-chat-exporter/
 └── viewer/             # 查看器（plain-framework）
     ├── index.html
     └── src/
-        ├── components/ # FileLoader / ConversationList / ChatView
+        ├── components/ # FileLoader / ConversationList / ChatView / LangSwitch
         ├── utils/      # json-parser / date-format / markdown
         ├── state.ts    # 模块级 signal 状态
+        ├── i18n.ts     # 中 / 英文案字典与语言 signal
         └── App.tsx
 ```
 
@@ -134,9 +138,11 @@ pnpm preview    # → http://127.0.0.1:8934/
 1. 打开 [chat.deepseek.com](https://chat.deepseek.com) 并登录（若扩展是后装的，先刷新一次页面）
 2. 点击扩展图标，popup 即为会话管理器：
    - 自动分页加载**全部**会话列表（keyset 翻页，不受单页数量限制），每行显示编号 / 标题 / 日期
+   - **置顶 / 非置顶双标签页**：置顶会话单独列出；非置顶页按自然日分组（今天 / 昨天 / …），点击组头可收起展开
    - **导出当前会话**：导出正在浏览的对话
    - **导出选中**：默认全选，勾选后合并导出为一个 JSON（限速：每 5 个请求暂停 800ms，进度实时显示）
    - **删除选中**：批量删除（学习式，见下），需自定义弹窗二次确认，不可恢复
+   - **语言**：右上角 `EN` / `ZH` 按钮切换界面语言，选择会被记住
 
 ### 批量删除（学习式）
 
